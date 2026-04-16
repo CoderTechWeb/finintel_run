@@ -10,10 +10,38 @@ from .file_reader import read_file
 from .field_mapper import build_column_mapping, mapping_report, apply_mapping
 from .record_parser import parse_record
 
-
-def ingest_file(filepath: str, time_range: Optional[str] = None) -> dict:
+def ingest_file(filepath: str, time_range: Optional[str] = None, original_filename: Optional[str] = None) -> dict:
     errors = []
 
+    # 🔥 STEP 1: Handle Excel Timesheet (NEW FLOW)
+    if filepath.lower().endswith((".xlsx", ".xls")):
+        try:
+            import re as _re
+            from .timesheet_parser import parse_timesheet
+
+            # Extract target month from filename (e.g. "MARCH-2026" or "March_2026")
+            basename = Path(original_filename or filepath).stem
+            month_match = _re.search(
+                r'(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)'
+                r'[\s_-]*(\d{2,4})',
+                basename, _re.IGNORECASE
+            )
+            target_month = None
+            if month_match:
+                target_month = f"{month_match.group(1)}'{month_match.group(2)[-2:]}"
+
+            ts_result = parse_timesheet(filepath, target_month=target_month)
+            return ts_result
+
+        except Exception as e:
+            return {
+                "file": filepath,
+                "sheets": {},
+                "overall_summary": {},
+                "errors": [str(e)],
+            }
+
+    # 🔥 STEP 2: OLD FLOW (CSV ONLY)
     try:
         raw_rows, file_meta = read_file(filepath)
     except Exception as e:

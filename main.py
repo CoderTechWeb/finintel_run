@@ -24,7 +24,7 @@ async def analyze(files: List[UploadFile] = File(...)):
             tmp_path = tmp.name
 
         # process file
-        result = ingest_file(tmp_path)
+        result = ingest_file(tmp_path, original_filename=file.filename)
 
         # attach filename for UI
         results.append({
