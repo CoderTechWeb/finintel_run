@@ -93,21 +93,18 @@ def build_projects(records: List[dict]) -> dict:
         proj = r.get("project") or "Unknown"
         if proj not in projects:
             projects[proj] = {
-                "total_revenue": 0, "total_cost": 0, "total_profit": 0,
+                "revenue": 0, "cost": 0, "profit": 0,
                 "employees": set(),
             }
-        projects[proj]["total_revenue"] += r.get("revenue", 0)
-        projects[proj]["total_cost"] += r.get("cost", 0)
-        projects[proj]["total_profit"] += r.get("profit", 0)
+        projects[proj]["revenue"] += r.get("revenue", 0)
+        projects[proj]["cost"] += r.get("cost", 0)
+        projects[proj]["profit"] += r.get("profit", 0)
         projects[proj]["employees"].add(r.get("employee", ""))
 
     for p in projects.values():
-        p["total_revenue"] = round(p["total_revenue"], 2)
-        p["total_cost"] = round(p["total_cost"], 2)
-        p["total_profit"] = round(p["total_profit"], 2)
-        rev = p["total_revenue"]
-        pft = p["total_profit"]
-        p["avg_margin_pct"] = round((pft / rev) * 100, 2) if rev > 0 else 0
+        p["revenue"] = round(p["revenue"], 2)
+        p["cost"] = round(p["cost"], 2)
+        p["profit"] = round(p["profit"], 2)
         p["employees"] = len(p["employees"])
 
     return projects

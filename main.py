@@ -39,6 +39,7 @@ async def ingest(files: List[UploadFile] = File(...)):
             tmp_path = tmp.name
 
         result = ingest_file(tmp_path, original_filename=file.filename)
+        result.pop("overall_summary", None)
 
         results.append({
             "filename": file.filename,
@@ -51,6 +52,7 @@ async def ingest(files: List[UploadFile] = File(...)):
         "total_records_in_dataset": len(GLOBAL_DATASET),
         "months_available": get_months_available(),
         "results": results,
+        "overall_summary": build_overall_summary(GLOBAL_DATASET),
     }
 
 
@@ -179,8 +181,8 @@ def _handle_qa(query: str):
     if "project" in q:
         projects = build_projects(records)
         lines = []
-        for name, data in sorted(projects.items(), key=lambda x: x[1]["total_profit"], reverse=True):
-            lines.append(f"- {name}: Revenue ${data['total_revenue']:,.2f}, Profit ${data['total_profit']:,.2f}, Margin {data['avg_margin_pct']}%")
+        for name, data in sorted(projects.items(), key=lambda x: x[1]["profit"], reverse=True):
+            lines.append(f"- {name}: Revenue ${data['revenue']:,.2f}, Cost ${data['cost']:,.2f}, Profit ${data['profit']:,.2f}")
         return "Project summary:\n" + "\n".join(lines), projects
 
     if any(w in q for w in ["last 3 month", "3m", "3 month", "quarter"]):
