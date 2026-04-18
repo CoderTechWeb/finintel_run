@@ -49,6 +49,13 @@ def _ollama_generate(prompt, timeout=60):
         return body.get("response", "")
 
 
+def _clean_json_text(raw):
+    """Strip JS-style comments and trailing commas that LLMs love to add."""
+    raw = re.sub(r'//[^\n]*', '', raw)
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    return raw.strip()
+
+
 def _extract_json(text):
     """Pull the first JSON object out of LLM response text."""
     text = text.strip()
@@ -58,11 +65,12 @@ def _extract_json(text):
         pass
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
+        cleaned = _clean_json_text(m.group(1))
         try:
-            return json.loads(m.group(1))
+            return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
-    # Greedy: find outermost { ... }
+    # Greedy: find outermost { ... }, then clean and parse
     depth, start = 0, None
     for i, ch in enumerate(text):
         if ch == "{":
@@ -72,8 +80,9 @@ def _extract_json(text):
         elif ch == "}":
             depth -= 1
             if depth == 0 and start is not None:
+                cleaned = _clean_json_text(text[start : i + 1])
                 try:
-                    return json.loads(text[start : i + 1])
+                    return json.loads(cleaned)
                 except json.JSONDecodeError:
                     start = None
     return None

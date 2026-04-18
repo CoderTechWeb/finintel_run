@@ -80,11 +80,20 @@ def filter_by_range(records: List[dict], time_range: Optional[str] = None) -> Li
 
 def get_months_available(records: List[dict] = None) -> List[str]:
     recs = records if records is not None else GLOBAL_DATASET
-    months = sorted(
-        {r["month"] for r in recs if r.get("month")},
-        key=lambda m: _parse_month_date(m) or dt.date.min,
-    )
-    return months
+    months_set = set()
+    for r in recs:
+        m = r.get("month")
+        if m and isinstance(m, str):
+            months_set.add(m)
+
+    def _sort_key(m):
+        try:
+            d = _parse_month_date(m)
+            return d if d else dt.date.min
+        except Exception:
+            return dt.date.min
+
+    return sorted(months_set, key=_sort_key)
 
 
 def build_projects(records: List[dict]) -> dict:
