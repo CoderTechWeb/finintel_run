@@ -4,7 +4,7 @@ FinIntel AI - Run Script
 Just run:  python run.py
 
 This will test all 5 sample files and show you the results clearly.
-You can also test your own file:  python run.py myfile.csv
+You can also test your own file:  python run.py myfile.csv 
 """
 
 import sys
