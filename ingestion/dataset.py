@@ -80,19 +80,18 @@ def filter_by_range(records: List[dict], time_range: Optional[str] = None) -> Li
     if not cutoff_days:
         return records
 
-    dated = []
+    today = dt.date.today()
+    cutoff = today - dt.timedelta(days=cutoff_days)
+
+    result = []
     for r in records:
         d = _parse_month_date(r.get("month", ""))
-        if d:
-            dated.append((r, d))
+        if d and d >= cutoff:
+            result.append(r)
+        elif not d:
+            result.append(r)
 
-    if not dated:
-        return records
-
-    max_date = max(d for _, d in dated)
-    cutoff = max_date - dt.timedelta(days=cutoff_days)
-
-    return [r for r, d in dated if d >= cutoff]
+    return result
 
 
 def get_months_available(records: List[dict] = None) -> List[str]:
