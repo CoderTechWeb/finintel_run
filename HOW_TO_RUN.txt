@@ -5,7 +5,7 @@
 STEP 1 — Make sure Python is installed
 ---------------------------------------
 Open your Terminal (Mac/Linux) or Command Prompt (Windows) and type:
-    python --version
+    python3 --version
     
 You should see something like "Python 3.10.x"
 If not, download Python from: https://www.python.org/downloads/
