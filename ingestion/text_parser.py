@@ -47,6 +47,48 @@ Extract ALL records you can find. Do NOT make up data that isn't in the text.
 """
 
 
+def looks_like_timesheet_text(text: str) -> bool:
+    """
+    Quick heuristic check: does this text contain enough timesheet/financial
+    keywords to justify sending it to the LLM?
+    Returns False for logs, configs, code, etc.
+    """
+    if not text or not text.strip():
+        return False
+    sample = text[:8000].lower()
+
+    # Must-have: at least one person-related keyword
+    person_keywords = ["employee", "name", "resource", "consultant", "staff",
+                       "worker", "person", "associate", "member"]
+    has_person = any(kw in sample for kw in person_keywords)
+
+    # Must-have: at least one financial/time keyword
+    finance_keywords = ["hours", "rate", "billing", "cost", "salary", "revenue",
+                        "profit", "timesheet", "billable", "invoice", "project",
+                        "working days", "leave", "vacation", "utilisation",
+                        "utilization", "margin"]
+    has_finance = any(kw in sample for kw in finance_keywords)
+
+    # Bonus: numbers that look like rates or hours (e.g., "150", "8.5", "$120")
+    import re
+    number_matches = re.findall(r'\b\d+\.?\d*\b', sample)
+    has_numbers = len(number_matches) >= 2
+
+    if has_person and has_finance and has_numbers:
+        return True
+
+    # Fallback: if text has both month references and numbers, it might be valid
+    month_keywords = ["january", "february", "march", "april", "may", "june",
+                      "july", "august", "september", "october", "november", "december",
+                      "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+    has_month = any(kw in sample for kw in month_keywords)
+
+    if has_month and has_finance and has_numbers:
+        return True
+
+    return False
+
+
 def parse_freeform_text(text: str) -> list[dict]:
     """
     Use LLM to extract structured records from freeform text.
@@ -54,6 +96,11 @@ def parse_freeform_text(text: str) -> list[dict]:
     Returns: list of dicts with employee record fields.
     """
     if not text or not text.strip():
+        return []
+
+    # Pre-validation: skip LLM if text doesn't look like timesheet data
+    if not looks_like_timesheet_text(text):
+        print("[text_parser] Text does not look like timesheet/financial data — skipping LLM")
         return []
 
     if not _AI_OK or not is_ollama_available():
@@ -135,9 +182,10 @@ def _normalize_extracted(r: dict) -> dict:
         except (ValueError, TypeError):
             return 0
 
+    from .normalizer import normalize_month_label
     employee = str(r.get("employee", "")).strip().title()
     project = str(r.get("project", "Unknown")).strip()
-    month = str(r.get("month", "Unknown")).strip()
+    month = normalize_month_label(r.get("month")) or "Unknown"
     actual_hours = _float(r.get("actual_hours"))
     billing_rate = _float(r.get("billing_rate"))
     cost_rate = _float(r.get("cost_rate"))

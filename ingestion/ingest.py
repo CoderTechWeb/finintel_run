@@ -16,7 +16,7 @@ from .file_reader import read_file
 from .field_mapper import build_column_mapping, mapping_report, apply_mapping
 from .record_parser import parse_record
 from .dataset import append_records
-from .text_parser import parse_freeform_text, is_freeform_text
+from .text_parser import parse_freeform_text, is_freeform_text, looks_like_timesheet_text
 
 def ingest_file(filepath: str, time_range: Optional[str] = None, original_filename: Optional[str] = None) -> dict:
     errors = []
@@ -131,12 +131,29 @@ def _ingest_freeform(filepath: str, time_range: Optional[str], original_filename
     except Exception as e:
         return {"errors": [f"Could not read file: {e}"], "records": [], "file_meta": {}, "summary": {}}
 
+    # Pre-validation: reject non-timesheet text before wasting an LLM call
+    if not looks_like_timesheet_text(raw_text):
+        return {
+            "errors": [
+                "This file does not appear to contain timesheet or financial data. "
+                "Expected keywords like employee names, hours, rates, billing, etc. "
+                "Please upload a file with timesheet/financial content."
+            ],
+            "records": [],
+            "file_meta": {
+                "filename": original_filename or filepath,
+                "file_type": "REJECTED_TEXT",
+                "char_count": len(raw_text),
+            },
+            "summary": {},
+        }
+
     records = parse_freeform_text(raw_text)
 
     if not records:
         return {
-            "errors": ["No employee records could be extracted from the text. "
-                       "Make sure the text contains financial/timesheet data."],
+            "errors": ["Text looks like timesheet data but no employee records could be extracted. "
+                       "Check that the text contains specific employee names, hours, and rates."],
             "records": [],
             "file_meta": {
                 "filename": original_filename or filepath,
@@ -183,17 +200,8 @@ def _ingest_freeform(filepath: str, time_range: Optional[str], original_filename
 
 
 def _apply_time_filter(records, time_range):
-    import datetime as dt
-    dated = [r for r in records if r.get("date")]
-    if not dated:
-        return records
-    max_date = max(dt.date.fromisoformat(r["date"]) for r in dated)
-    days_map = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
-    cutoff_days = days_map.get(time_range.upper())
-    if not cutoff_days:
-        return records
-    cutoff = max_date - dt.timedelta(days=cutoff_days)
-    return [r for r in records if r.get("date") and dt.date.fromisoformat(r["date"]) >= cutoff]
+    from .dataset import filter_by_range
+    return filter_by_range(records, time_range)
 
 
 def _build_summary(records, file_meta, map_report, parse_errors, time_range):

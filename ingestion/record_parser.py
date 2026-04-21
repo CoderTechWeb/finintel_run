@@ -13,7 +13,7 @@ from datetime import datetime
 def to_float(v):
     try:
         return float(v) if v is not None else None
-    except:
+    except (ValueError, TypeError):
         return None
 
 
@@ -26,16 +26,12 @@ def normalize_employee(name: str) -> str:
 def normalize_project(name: str) -> str:
     if not name:
         return None
-    return str(name).replace("-", "").replace(" ", "").lower()
+    return str(name).strip()
 
 
 def normalize_month(m):
-    if not m:
-        return None
-    try:
-        return datetime.strptime(m, "%B %Y").strftime("%Y-%m")
-    except:
-        return str(m)
+    from .normalizer import normalize_month_label
+    return normalize_month_label(m)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +66,8 @@ def parse_record(row: Dict[str, Any]) -> Dict[str, Any]:
     actual_hours = hours or 0
     billable_hours = hours or 0
     working_days = round(actual_hours / 8, 2) if actual_hours else 0
-    vacation_days = 0
+    vacation_days = to_float(row.get("vacation_days")) or to_float(row.get("leaves")) or 0
+    leave_hours = vacation_days * 8
 
     # ─────────────────────────────────────────
     # Financial Calculations
@@ -85,7 +82,7 @@ def parse_record(row: Dict[str, Any]) -> Dict[str, Any]:
 
     # Cost
     if cost_rate and cost_rate != 0:
-        cost = round(actual_hours * cost_rate, 2)
+        cost = round((actual_hours + leave_hours) * cost_rate, 2)
     else:
         cost = None
         flags.append("MISSING_COST_RATE")
@@ -103,7 +100,8 @@ def parse_record(row: Dict[str, Any]) -> Dict[str, Any]:
         margin_pct = None
 
     # Utilisation
-    utilisation_pct = round((actual_hours / (actual_hours or 1)) * 100, 2) if actual_hours else 0
+    expected_hours = to_float(row.get("expected_hours")) or to_float(row.get("max_hours")) or 0
+    utilisation_pct = round((actual_hours / expected_hours) * 100, 2) if expected_hours > 0 else (100.0 if actual_hours > 0 else 0)
 
     # Flags
     if margin_pct is not None and margin_pct < 10:
