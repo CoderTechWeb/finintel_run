@@ -118,3 +118,4 @@ The ingestion flow supports:
 - If you get `python: command not found`, use `python3` instead.
 - If you get dependency import errors, run `uv sync` again.
 - If Q&A responses fail, make sure Ollama is running.
+
