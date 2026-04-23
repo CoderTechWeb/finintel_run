@@ -108,6 +108,89 @@ def _safe_float(row, idx):
         return 0
 
 
+_LEAVE_MARKERS = {"off", "l", "leave", ""}
+_HOLIDAY_MARKERS = {"ph", "holiday", "public holiday"}
+_WEEKDAY_MARKERS = {
+    "mon", "monday", "tue", "tues", "tuesday", "wed", "wednesday",
+    "thu", "thur", "thurs", "thursday", "fri", "friday", "sat", "saturday",
+    "sun", "sunday"
+}
+
+
+def _is_daily_date_col(v):
+    if is_date(v):
+        return True
+    if isinstance(v, (int, float)):
+        iv = int(v)
+        return float(iv) == float(v) and 1 <= iv <= 31
+
+    s = clean(v).strip().lower()
+    if not s:
+        return False
+    if s in _WEEKDAY_MARKERS:
+        return True
+    if re.match(r"^\d{1,2}$", s):
+        return 1 <= int(s) <= 31
+    if re.match(r"^\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?$", s):
+        return True
+    if re.match(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$", s):
+        return True
+    return False
+
+
+def _get_daily_date_columns(header):
+    cols = [i for i, v in enumerate(header or []) if _is_daily_date_col(v)]
+    return cols if len(cols) >= 5 else []
+
+
+def _compute_daily_metrics(row, day_cols):
+    working_days = 0
+    leave_days = 0
+    holiday_days = 0
+    actual_hours = 0.0
+
+    for idx in day_cols:
+        if idx >= len(row):
+            continue
+
+        val = row[idx]
+        if val is None:
+            leave_days += 1
+            continue
+
+        if isinstance(val, (int, float)):
+            hrs = float(val)
+            if hrs > 0:
+                actual_hours += hrs
+                working_days += 1
+            continue
+
+        s = clean(val).strip()
+        low = s.lower()
+
+        if low in _LEAVE_MARKERS:
+            leave_days += 1
+            continue
+        if low in _HOLIDAY_MARKERS:
+            holiday_days += 1
+            continue
+
+        try:
+            hrs = float(low)
+            if hrs > 0:
+                actual_hours += hrs
+                working_days += 1
+        except (ValueError, TypeError):
+            continue
+
+    return {
+        "actual_hours": round(actual_hours, 2),
+        "working_days": working_days,
+        "leave_days": leave_days,
+        "holiday_days": holiday_days,
+    }
+
+
 def _safe_int(row, idx):
     if idx is None or idx >= len(row) or row[idx] is None:
         return 0
@@ -115,6 +198,17 @@ def _safe_int(row, idx):
         return int(float(row[idx]))
     except (ValueError, TypeError):
         return 0
+
+
+def _has_cell_value(row, idx):
+    if idx is None or idx >= len(row):
+        return False
+    val = row[idx]
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return val.strip() != ""
+    return True
 
 
 # ── Column mapping (patterns + AI) ──────────────────────────────────────
@@ -333,6 +427,8 @@ def _extract_employees(rows, header_idx, col_map, data_start=None, data_end=None
     if data_end is None:
         data_end = min(data_start + 50, len(rows) - 1)
 
+    day_cols = _get_daily_date_columns(header)
+
     employees = {}
     found_any = False
     for r in rows[data_start : data_end + 1]:
@@ -345,11 +441,41 @@ def _extract_employees(rows, header_idx, col_map, data_start=None, data_end=None
             if found_any:
                 break
             continue
-        name = clean(name_val)
+        base_name = clean(name_val)
+        name = base_name
         if name.lower() in SKIP_NAMES:
             if found_any:
                 break
             continue
+        if name in employees:
+            suffix = 2
+            while f"{base_name} ({suffix})" in employees:
+                suffix += 1
+            name = f"{base_name} ({suffix})"
+
+        daily = _compute_daily_metrics(r, day_cols) if day_cols else {
+            "actual_hours": 0.0,
+            "working_days": 0,
+            "leave_days": 0,
+            "holiday_days": 0,
+        }
+
+        row_actual = _safe_float(r, actual_idx) or _safe_float(r, sub_actual_idx)
+        actual_hours = daily["actual_hours"] if day_cols else row_actual
+        if not actual_hours and row_actual:
+            actual_hours = row_actual
+
+        row_working_days = _safe_int(r, wd_idx)
+        if _has_cell_value(r, wd_idx):
+            working_days = row_working_days
+        else:
+            working_days = daily["working_days"] if day_cols else row_working_days
+
+        row_leave_days = _safe_int(r, leaves_idx)
+        if _has_cell_value(r, leaves_idx):
+            leave_days = row_leave_days
+        else:
+            leave_days = daily["leave_days"] if day_cols else row_leave_days
 
         # Project
         project = default_project or ""
@@ -362,11 +488,13 @@ def _extract_employees(rows, header_idx, col_map, data_start=None, data_end=None
             "project":       project,
             "billing_rate":  _safe_float(r, rate_idx),
             "cost_rate":     _safe_float(r, cost_idx),
-            "actual_hours":  _safe_float(r, actual_idx) or _safe_float(r, sub_actual_idx),
+            "actual_hours":  actual_hours,
             "billable_hours":_safe_float(r, billable_idx) or _safe_float(r, sub_billable_idx),
             "expected_hours":_safe_float(r, max_idx),
-            "vacation_days": _safe_int(r, leaves_idx),
-            "working_days":  _safe_int(r, wd_idx),
+            "vacation_days": leave_days,
+            "leave_days":    leave_days,
+            "holiday_days":  daily["holiday_days"],
+            "working_days":  working_days,
         }
         found_any = True
 
@@ -420,9 +548,9 @@ def _parse_with_patterns(rows):
         fort_data = _extract_employees(rows, h_idx, col_map)
         for name, data in fort_data.items():
             if name not in merged:
-                merged[name] = {k: 0 for k in ["actual_hours", "billable_hours", "expected_hours", "vacation_days", "working_days"]}
+                merged[name] = {k: 0 for k in ["actual_hours", "billable_hours", "expected_hours", "vacation_days", "leave_days", "holiday_days", "working_days"]}
                 merged[name]["project"] = data["project"]
-            for k in ["actual_hours", "billable_hours", "expected_hours", "vacation_days", "working_days"]:
+            for k in ["actual_hours", "billable_hours", "expected_hours", "vacation_days", "leave_days", "holiday_days", "working_days"]:
                 merged[name][k] += data.get(k, 0)
 
     # Overlay summary (rates + authoritative totals)
@@ -434,9 +562,11 @@ def _parse_with_patterns(rows):
                                           default_project=_extract_project_from_metadata(rows))
         if merged:
             # Overlay mode: enrich existing fortnight data
+            matched_names = 0
             for name in merged:
                 sm = _fuzzy_get(name, summary_emps)
                 if sm:
+                    matched_names += 1
                     for k in ["billing_rate", "cost_rate"]:
                         if sm.get(k):
                             merged[name][k] = sm[k]
@@ -448,9 +578,16 @@ def _parse_with_patterns(rows):
                         merged[name]["expected_hours"] = sm["expected_hours"]
                     if sm.get("vacation_days"):
                         merged[name]["vacation_days"] = sm["vacation_days"]
+                    if sm.get("leave_days"):
+                        merged[name]["leave_days"] = sm["leave_days"]
                 else:
                     merged[name].setdefault("billing_rate", 0)
                     merged[name].setdefault("cost_rate", 0)
+
+            # If summary and fortnight sections have zero name overlap,
+            # trust summary rows as authoritative for that sheet.
+            if matched_names == 0 and summary_emps:
+                merged = summary_emps
         else:
             # No fortnights — use summary section as primary data
             merged = summary_emps
@@ -504,7 +641,9 @@ def _build_employee_record(name, data, month_label):
     billable_hours = data.get("billable_hours", 0) or actual_hours
     expected_hours = data.get("expected_hours", 0)
     working_days   = data.get("working_days", 0)
-    vacation_days  = data.get("vacation_days", 0)
+    leave_days     = data.get("leave_days", data.get("vacation_days", 0))
+    holiday_days   = data.get("holiday_days", 0)
+    vacation_days  = leave_days
 
     if working_days == 0 and expected_hours > 0:
         working_days = int(expected_hours / HOURS_PER_DAY)
@@ -516,7 +655,7 @@ def _build_employee_record(name, data, month_label):
     cost_rate    = data.get("cost_rate", 0)
 
     revenue = round(billable_hours * billing_rate, 2) if billing_rate else 0
-    cost    = round((actual_hours + leave_hours) * cost_rate, 2) if cost_rate else 0
+    cost    = round(actual_hours * cost_rate, 2) if cost_rate else 0
     profit  = round(revenue - cost, 2)
     margin_pct      = round((profit / revenue) * 100, 2) if revenue > 0 else (0 if revenue == 0 and profit == 0 else -100)
     utilisation_pct  = round((actual_hours / expected_hours) * 100, 2) if expected_hours > 0 else 0
@@ -543,6 +682,8 @@ def _build_employee_record(name, data, month_label):
         "project": data.get("project", ""),
         "month": month_label,
         "working_days": working_days,
+        "leave_days": leave_days,
+        "holiday_days": holiday_days,
         "vacation_days": vacation_days,
         "effective_working_days": effective_working_days,
         "actual_hours": actual_hours,
@@ -563,9 +704,47 @@ def _build_employee_record(name, data, month_label):
 
 
 # ── Month filter ──────────────────────────────────────────────────────────
+def _month_year_key(label):
+    if not label:
+        return None
+    token_map = {
+        "JAN": 1, "JANUARY": 1,
+        "FEB": 2, "FEBRUARY": 2,
+        "MAR": 3, "MARCH": 3,
+        "APR": 4, "APRIL": 4,
+        "MAY": 5,
+        "JUN": 6, "JUNE": 6,
+        "JUL": 7, "JULY": 7,
+        "AUG": 8, "AUGUST": 8,
+        "SEP": 9, "SEPTEMBER": 9,
+        "OCT": 10, "OCTOBER": 10,
+        "NOV": 11, "NOVEMBER": 11,
+        "DEC": 12, "DECEMBER": 12,
+    }
+    m = re.search(
+        r"(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\D*(\d{2,4})",
+        str(label),
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    month_token = m.group(1).upper()
+    year = int(m.group(2))
+    if year < 100:
+        year += 2000
+    month_num = token_map.get(month_token, token_map.get(month_token[:3]))
+    if not month_num:
+        return None
+    return month_num, year
+
+
 def _match_target_month(sheet_name, target_month):
     if not target_month:
         return True
+    target_key = _month_year_key(target_month)
+    sheet_key = _month_year_key(sheet_name)
+    if target_key and sheet_key:
+        return target_key == sheet_key
     def _norm(s):
         s = s.upper().replace("-", "").replace(" ", "").replace("'", "")
         s = re.sub(r"20(\d{2})", r"\1", s)
@@ -582,6 +761,18 @@ def parse_timesheet(filepath, target_month=None):
         "sheets": {}
     }
 
+    def _norm_month_text(s):
+        s = str(s).upper().replace("-", "").replace(" ", "").replace("'", "")
+        s = re.sub(r"20(\d{2})", r"\1", s)
+        return s
+
+    exact_month_sheets = set()
+    if target_month:
+        target_norm = _norm_month_text(target_month)
+        exact_month_sheets = {
+            sn for sn in wb.sheetnames if _norm_month_text(sn) == target_norm
+        }
+
     # Two-phase sheet selection:
     #   Phase 1: Only sheets matching target_month (fast, precise)
     #   Phase 2: ALL sheets (fallback if Phase 1 found nothing — handles
@@ -595,8 +786,12 @@ def parse_timesheet(filepath, target_month=None):
                 continue  # already processed
 
             # Phase 1: skip non-matching sheets
-            if phase == 1 and target_month and not _match_target_month(sheet_name, target_month):
-                continue
+            if phase == 1 and target_month:
+                if exact_month_sheets:
+                    if sheet_name not in exact_month_sheets:
+                        continue
+                elif not _match_target_month(sheet_name, target_month):
+                    continue
 
             ws = wb[sheet_name]
             rows = [list(r) for r in ws.iter_rows(values_only=True)]
@@ -690,6 +885,8 @@ def parse_timesheet(filepath, target_month=None):
                     "total_actual_hours": round(sum(e["actual_hours"] for e in employees), 2),
                     "total_billable_hours": round(sum(e["billable_hours"] for e in employees), 2),
                     "total_working_days": sum(e["working_days"] for e in employees),
+                    "total_leave_days": sum(e.get("leave_days", e.get("vacation_days", 0)) for e in employees),
+                    "total_holidays": sum(e.get("holiday_days", 0) for e in employees),
                 },
                 "projects": projects,
                 "employees": employees,

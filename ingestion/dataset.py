@@ -5,6 +5,7 @@ dataset.py — Global in-memory dataset and analytics transforms.
 import datetime as dt
 import re
 import threading
+import math
 from typing import Optional, List
 
 _LOCK = threading.Lock()
@@ -22,6 +23,44 @@ _DEDUP_KEYS: set = set()
 def _normalize_key(s: str) -> str:
     """Normalize a string for dedup comparison: lowercase, strip all non-alphanumeric."""
     return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _to_num(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        text = str(value).strip()
+        if text == "":
+            return 0.0
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _calc_margin(total_revenue: float, total_cost: float) -> float:
+    if total_revenue <= 0:
+        return 0.0
+    return round(((total_revenue - total_cost) / total_revenue) * 100, 2)
+
+
+def _month_sort_key(month_label: str) -> dt.date:
+    parsed = _parse_month_date(month_label)
+    return parsed if parsed else dt.date.min
+
+
+def _trend_from_values(values: List[float]) -> str:
+    if len(values) < 2:
+        return "Stable"
+    compare = values[-3:] if len(values) >= 3 else values[-2:]
+    start = compare[0]
+    end = compare[-1]
+    delta = end - start
+    baseline = max(abs(start), 1.0)
+    if abs(delta) <= baseline * 0.03:
+        return "Stable"
+    return "Up" if delta > 0 else "Down"
 
 
 def clear():
@@ -205,17 +244,181 @@ def build_monthly(records: List[dict]) -> dict:
 
 
 def build_overall_summary(records: List[dict]) -> dict:
-    total_rev = round(sum(r.get("revenue") or 0 for r in records), 2)
-    total_cost = round(sum(r.get("cost") or 0 for r in records), 2)
-    total_profit = round(sum(r.get("profit") or 0 for r in records), 2)
-    unique_employees = len({r.get("employee") for r in records if r.get("employee")})
+    total_rev = 0.0
+    total_cost = 0.0
+    total_hours = 0.0
+    employees = set()
+
+    for r in records:
+        total_rev += _to_num(r.get("revenue"))
+        total_cost += _to_num(r.get("cost"))
+        total_hours += _to_num(r.get("actual_hours"))
+        name = r.get("employee")
+        if name:
+            employees.add(name)
+
+    total_rev = round(total_rev, 2)
+    total_cost = round(total_cost, 2)
+    total_profit = round(total_rev - total_cost, 2)
     return {
         "total_revenue": total_rev,
         "total_cost": total_cost,
         "total_profit": total_profit,
-        "avg_margin_pct": round((total_profit / total_rev) * 100, 2) if total_rev > 0 else 0,
-        "total_employees": unique_employees,
+        "avg_margin_pct": _calc_margin(total_rev, total_cost),
+        "total_employees": len(employees),
+        "total_hours": round(total_hours, 2),
     }
+
+
+def build_project_summaries(records: List[dict]) -> List[dict]:
+    projects = {}
+
+    for r in records:
+        project_name = r.get("project") or "Unknown"
+        month = r.get("month") or "Unknown"
+        revenue = _to_num(r.get("revenue"))
+        cost = _to_num(r.get("cost"))
+
+        if project_name not in projects:
+            projects[project_name] = {
+                "revenue": 0.0,
+                "cost": 0.0,
+                "monthly": {},
+                "employees": set(),
+            }
+
+        proj = projects[project_name]
+        proj["revenue"] += revenue
+        proj["cost"] += cost
+        employee_name = r.get("employee")
+        if employee_name:
+            proj["employees"].add(employee_name)
+
+        if month not in proj["monthly"]:
+            proj["monthly"][month] = {"revenue": 0.0, "cost": 0.0}
+        proj["monthly"][month]["revenue"] += revenue
+        proj["monthly"][month]["cost"] += cost
+
+    output = []
+    for project_name, data in projects.items():
+        total_revenue = round(data["revenue"], 2)
+        total_cost = round(data["cost"], 2)
+        total_profit = round(total_revenue - total_cost, 2)
+        gross_margin_pct = _calc_margin(total_revenue, total_cost)
+
+        ordered_months = sorted(data["monthly"].keys(), key=_month_sort_key)
+        revenue_series = [round(data["monthly"][m]["revenue"], 2) for m in ordered_months]
+        cost_series = [round(data["monthly"][m]["cost"], 2) for m in ordered_months]
+        profit_series = [round(rev - cst, 2) for rev, cst in zip(revenue_series, cost_series)]
+        margin_series = [_calc_margin(rev, cst) for rev, cst in zip(revenue_series, cost_series)]
+
+        if gross_margin_pct > 40:
+            status = "Healthy"
+        elif gross_margin_pct >= 30:
+            status = "Optimal"
+        else:
+            status = "At Risk"
+
+        output.append({
+            "project_name": project_name,
+            "total_revenue": total_revenue,
+            "total_cost": total_cost,
+            "total_profit": total_profit,
+            "gross_margin_pct": gross_margin_pct,
+            "employees": len(data["employees"]),
+            "status": status,
+            "trends": {
+                "revenue_trend": _trend_from_values(revenue_series),
+                "cost_trend": _trend_from_values(cost_series),
+                "profit_trend": _trend_from_values(profit_series),
+                "margin_trend": _trend_from_values(margin_series),
+            },
+        })
+
+    output.sort(key=lambda x: x["total_profit"], reverse=True)
+    return output
+
+
+def build_employee_summaries(records: List[dict]) -> List[dict]:
+    employees = {}
+
+    for r in records:
+        employee_name = r.get("employee") or "Unknown"
+        project_name = r.get("project") or "Unknown"
+
+        hours = _to_num(r.get("actual_hours"))
+        revenue = _to_num(r.get("revenue"))
+        cost = _to_num(r.get("cost"))
+        profit = revenue - cost
+        approved_hours = _to_num(r.get("expected_hours") if r.get("expected_hours") is not None else r.get("max_hours"))
+
+        if employee_name not in employees:
+            employees[employee_name] = {
+                "hours": 0.0,
+                "revenue": 0.0,
+                "profit": 0.0,
+                "approved_hours": 0.0,
+                "projects": {},
+            }
+
+        emp = employees[employee_name]
+        emp["hours"] += hours
+        emp["revenue"] += revenue
+        emp["profit"] += profit
+        emp["approved_hours"] += approved_hours
+
+        if project_name not in emp["projects"]:
+            emp["projects"][project_name] = {
+                "hours": 0.0,
+                "revenue": 0.0,
+                "profit": 0.0,
+            }
+
+        proj = emp["projects"][project_name]
+        proj["hours"] += hours
+        proj["revenue"] += revenue
+        proj["profit"] += profit
+
+    total_employees = len(employees)
+    contribution_slice = max(1, math.ceil(total_employees * 0.25)) if total_employees else 0
+    ranked = sorted(employees.items(), key=lambda item: item[1]["profit"], reverse=True)
+    high_contributors = {name for name, _ in ranked[:contribution_slice]}
+    low_contributors = {name for name, _ in ranked[-contribution_slice:]} if contribution_slice else set()
+
+    output = []
+    for employee_name, data in employees.items():
+        approved_total = data["approved_hours"]
+        utilization = round((data["hours"] / approved_total) * 100, 2) if approved_total > 0 else None
+
+        projects = []
+        for project_name, p in data["projects"].items():
+            projects.append({
+                "project_name": project_name,
+                "revenue": round(p["revenue"], 2),
+                "profit": round(p["profit"], 2),
+                "hours": round(p["hours"], 2),
+            })
+        projects.sort(key=lambda x: x["profit"], reverse=True)
+
+        if employee_name in high_contributors:
+            contribution_status = "High"
+        elif employee_name in low_contributors:
+            contribution_status = "Low"
+        else:
+            contribution_status = "Optimal"
+
+        output.append({
+            "employee_name": employee_name,
+            "total_hours": round(data["hours"], 2),
+            "total_revenue": round(data["revenue"], 2),
+            "total_profit": round(data["profit"], 2),
+            "utilization_pct": utilization,
+            "projects": projects,
+            "contribution_status": contribution_status,
+        })
+
+    output.sort(key=lambda x: x["total_profit"], reverse=True)
+    return output
 
 
 def build_top_performers(records: List[dict], limit: int = 5) -> List[dict]:
@@ -247,6 +450,8 @@ def _clean_record_for_api(r: dict) -> dict:
         "actual_hours": r.get("actual_hours") or 0,
         "billable_hours": r.get("billable_hours") or 0,
         "working_days": r.get("working_days") or 0,
+        "leave_days": r.get("leave_days") or r.get("vacation_days") or 0,
+        "holiday_days": r.get("holiday_days") or 0,
         "vacation_days": r.get("vacation_days") or 0,
         "billing_rate": r.get("billing_rate"),
         "cost_rate": r.get("cost_rate"),

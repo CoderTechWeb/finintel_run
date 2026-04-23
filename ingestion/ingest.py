@@ -34,13 +34,14 @@ def ingest_file(filepath: str, time_range: Optional[str] = None, original_filena
             # Extract target month from filename (e.g. "MARCH-2026" or "March_2026")
             basename = Path(original_filename or filepath).stem
             month_match = _re.search(
-                r'(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)'
+                r'(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
                 r'[\s_-]*(\d{2,4})',
                 basename, _re.IGNORECASE
             )
             target_month = None
             if month_match:
-                target_month = f"{month_match.group(1)}'{month_match.group(2)[-2:]}"
+                month_token = month_match.group(1).upper()[:3]
+                target_month = f"{month_token}'{month_match.group(2)[-2:]}"
 
             ts_result = parse_timesheet(filepath, target_month=target_month)
 
