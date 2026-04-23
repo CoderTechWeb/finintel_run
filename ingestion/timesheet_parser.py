@@ -629,7 +629,7 @@ def _build_employee_record(name, data, month_label):
     cost_rate    = data.get("cost_rate", 0)
 
     revenue = round(billable_hours * billing_rate, 2) if billing_rate else 0
-    cost    = round((actual_hours + leave_hours) * cost_rate, 2) if cost_rate else 0
+    cost    = round(actual_hours * cost_rate, 2) if cost_rate else 0
     profit  = round(revenue - cost, 2)
     margin_pct      = round((profit / revenue) * 100, 2) if revenue > 0 else (0 if revenue == 0 and profit == 0 else -100)
     utilisation_pct  = round((actual_hours / expected_hours) * 100, 2) if expected_hours > 0 else 0
