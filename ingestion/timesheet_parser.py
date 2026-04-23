@@ -200,6 +200,17 @@ def _safe_int(row, idx):
         return 0
 
 
+def _has_cell_value(row, idx):
+    if idx is None or idx >= len(row):
+        return False
+    val = row[idx]
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return val.strip() != ""
+    return True
+
+
 # ── Column mapping (patterns + AI) ──────────────────────────────────────
 _ai_col_cache = {}
 
@@ -455,14 +466,16 @@ def _extract_employees(rows, header_idx, col_map, data_start=None, data_end=None
             actual_hours = row_actual
 
         row_working_days = _safe_int(r, wd_idx)
-        working_days = daily["working_days"] if day_cols else row_working_days
-        if not working_days and row_working_days:
+        if _has_cell_value(r, wd_idx):
             working_days = row_working_days
+        else:
+            working_days = daily["working_days"] if day_cols else row_working_days
 
         row_leave_days = _safe_int(r, leaves_idx)
-        leave_days = daily["leave_days"] if day_cols else row_leave_days
-        if not leave_days and row_leave_days:
+        if _has_cell_value(r, leaves_idx):
             leave_days = row_leave_days
+        else:
+            leave_days = daily["leave_days"] if day_cols else row_leave_days
 
         # Project
         project = default_project or ""
