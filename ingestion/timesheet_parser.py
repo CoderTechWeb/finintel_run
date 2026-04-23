@@ -430,11 +430,17 @@ def _extract_employees(rows, header_idx, col_map, data_start=None, data_end=None
             if found_any:
                 break
             continue
-        name = clean(name_val)
+        base_name = clean(name_val)
+        name = base_name
         if name.lower() in SKIP_NAMES:
             if found_any:
                 break
             continue
+        if name in employees:
+            suffix = 2
+            while f"{base_name} ({suffix})" in employees:
+                suffix += 1
+            name = f"{base_name} ({suffix})"
 
         daily = _compute_daily_metrics(r, day_cols) if day_cols else {
             "actual_hours": 0.0,
@@ -543,9 +549,11 @@ def _parse_with_patterns(rows):
                                           default_project=_extract_project_from_metadata(rows))
         if merged:
             # Overlay mode: enrich existing fortnight data
+            matched_names = 0
             for name in merged:
                 sm = _fuzzy_get(name, summary_emps)
                 if sm:
+                    matched_names += 1
                     for k in ["billing_rate", "cost_rate"]:
                         if sm.get(k):
                             merged[name][k] = sm[k]
@@ -562,6 +570,11 @@ def _parse_with_patterns(rows):
                 else:
                     merged[name].setdefault("billing_rate", 0)
                     merged[name].setdefault("cost_rate", 0)
+
+            # If summary and fortnight sections have zero name overlap,
+            # trust summary rows as authoritative for that sheet.
+            if matched_names == 0 and summary_emps:
+                merged = summary_emps
         else:
             # No fortnights — use summary section as primary data
             merged = summary_emps
@@ -678,9 +691,47 @@ def _build_employee_record(name, data, month_label):
 
 
 # ── Month filter ──────────────────────────────────────────────────────────
+def _month_year_key(label):
+    if not label:
+        return None
+    token_map = {
+        "JAN": 1, "JANUARY": 1,
+        "FEB": 2, "FEBRUARY": 2,
+        "MAR": 3, "MARCH": 3,
+        "APR": 4, "APRIL": 4,
+        "MAY": 5,
+        "JUN": 6, "JUNE": 6,
+        "JUL": 7, "JULY": 7,
+        "AUG": 8, "AUGUST": 8,
+        "SEP": 9, "SEPTEMBER": 9,
+        "OCT": 10, "OCTOBER": 10,
+        "NOV": 11, "NOVEMBER": 11,
+        "DEC": 12, "DECEMBER": 12,
+    }
+    m = re.search(
+        r"(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)\D*(\d{2,4})",
+        str(label),
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    month_token = m.group(1).upper()
+    year = int(m.group(2))
+    if year < 100:
+        year += 2000
+    month_num = token_map.get(month_token, token_map.get(month_token[:3]))
+    if not month_num:
+        return None
+    return month_num, year
+
+
 def _match_target_month(sheet_name, target_month):
     if not target_month:
         return True
+    target_key = _month_year_key(target_month)
+    sheet_key = _month_year_key(sheet_name)
+    if target_key and sheet_key:
+        return target_key == sheet_key
     def _norm(s):
         s = s.upper().replace("-", "").replace(" ", "").replace("'", "")
         s = re.sub(r"20(\d{2})", r"\1", s)
@@ -697,6 +748,18 @@ def parse_timesheet(filepath, target_month=None):
         "sheets": {}
     }
 
+    def _norm_month_text(s):
+        s = str(s).upper().replace("-", "").replace(" ", "").replace("'", "")
+        s = re.sub(r"20(\d{2})", r"\1", s)
+        return s
+
+    exact_month_sheets = set()
+    if target_month:
+        target_norm = _norm_month_text(target_month)
+        exact_month_sheets = {
+            sn for sn in wb.sheetnames if _norm_month_text(sn) == target_norm
+        }
+
     # Two-phase sheet selection:
     #   Phase 1: Only sheets matching target_month (fast, precise)
     #   Phase 2: ALL sheets (fallback if Phase 1 found nothing — handles
@@ -710,8 +773,12 @@ def parse_timesheet(filepath, target_month=None):
                 continue  # already processed
 
             # Phase 1: skip non-matching sheets
-            if phase == 1 and target_month and not _match_target_month(sheet_name, target_month):
-                continue
+            if phase == 1 and target_month:
+                if exact_month_sheets:
+                    if sheet_name not in exact_month_sheets:
+                        continue
+                elif not _match_target_month(sheet_name, target_month):
+                    continue
 
             ws = wb[sheet_name]
             rows = [list(r) for r in ws.iter_rows(values_only=True)]
