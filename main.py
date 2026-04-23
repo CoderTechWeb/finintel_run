@@ -8,6 +8,7 @@ from ingestion.dataset import (
     build_projects, build_monthly, build_overall_summary,
     build_top_performers, get_months_available,
     clear as clear_dataset, remove_by_file, get_files_processed,
+    build_project_summaries, build_employee_summaries,
 )
 from ingestion.qa_engine import ask as qa_ask
 from ingestion.risk_engine import get_risks_and_recommendations
@@ -192,9 +193,11 @@ def get_dataset(time_range: Optional[str] = Query(None, alias="range", descripti
 @app.get("/metrics")
 def get_metrics(time_range: Optional[str] = Query(None, alias="range")):
     filtered = filter_by_range(GLOBAL_DATASET, time_range)
+    overall_summary = build_overall_summary(filtered)
     return {
         "time_range": time_range or "ALL",
-        "overall_summary": build_overall_summary(filtered),
+        "total_hours": overall_summary.get("total_hours", 0),
+        "overall_summary": overall_summary,
         "monthly": build_monthly(filtered),
     }
 
@@ -205,7 +208,7 @@ def get_projects(time_range: Optional[str] = Query(None, alias="range")):
     filtered = filter_by_range(GLOBAL_DATASET, time_range)
     return {
         "time_range": time_range or "ALL",
-        "projects": build_projects(filtered),
+        "projects": build_project_summaries(filtered),
     }
 
 
@@ -215,23 +218,7 @@ def get_employees(time_range: Optional[str] = Query(None, alias="range"), projec
     filtered = filter_by_range(GLOBAL_DATASET, time_range)
     if project:
         filtered = [r for r in filtered if r.get("project", "").lower() == project.lower()]
-    employees = []
-    for r in filtered:
-        employees.append({
-            "employee": r.get("employee"),
-            "project": r.get("project"),
-            "month": r.get("month"),
-            "actual_hours": r.get("actual_hours") or 0,
-            "billable_hours": r.get("billable_hours") or 0,
-            "working_days": r.get("working_days") or 0,
-            "vacation_days": r.get("vacation_days") or 0,
-            "revenue": r.get("revenue"),
-            "cost": r.get("cost"),
-            "profit": r.get("profit"),
-            "margin_pct": r.get("margin_pct"),
-            "utilisation_pct": r.get("utilisation_pct"),
-            "is_profitable": r.get("is_profitable"),
-        })
+    employees = build_employee_summaries(filtered)
     return {
         "time_range": time_range or "ALL",
         "count": len(employees),
