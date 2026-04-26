@@ -40,18 +40,13 @@ Production-ready for HR performance reviews. Covers:
   FALLING_UTILISATION_TREND Avg utilisation dropped 5+ pts
 
 AI layer (optional):
-  Uses OpenAI (gpt-4o-mini) when OPENAI_API_KEY is set.
-  Falls back to Ollama (llama3) when available.
-  Falls back to rule-based engine when neither is available.
+  Uses Ollama (llama3) when available for strategic insights.
+  Falls back to rule-based engine output when Ollama is unavailable.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import urllib.error
-import urllib.request
 from datetime import date
 from typing import Optional
 
@@ -68,8 +63,6 @@ from .ai_mapper import _ollama_generate, is_ollama_available
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-OPENAI_CHAT_URL   = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 HOURS_PER_DAY     = 8.0
 DEFAULT_WORK_DAYS = 22          # fallback when working_days not in record
 
@@ -1144,38 +1137,8 @@ def _build_employee_scorecards(timelines: dict[str, list[dict]]) -> list[dict]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 9 — AI strategic insights layer (OpenAI / Ollama)
+# SECTION 9 — AI strategic insights layer (Ollama)
 # ═════════════════════════════════════════════════════════════════════════════
-
-def _openai_api_key() -> str:
-    return (os.environ.get("OPENAI_API_KEY") or "").strip()
-
-
-def _is_openai_available() -> bool:
-    return bool(_openai_api_key())
-
-
-def _openai_generate(prompt: str, timeout: int = 60) -> str:
-    payload = json.dumps({
-        "model":    OPENAI_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are FinIntel AI, an expert HR and financial risk advisor."},
-            {"role": "user",   "content": prompt},
-        ],
-        "temperature": 0.2,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        OPENAI_CHAT_URL,
-        data=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {_openai_api_key()}",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body    = json.loads(resp.read().decode("utf-8"))
-        choices = body.get("choices") or []
-        return (choices[0].get("message") or {}).get("content", "") if choices else ""
 
 
 _INSIGHT_PROMPT = """\
@@ -1201,7 +1164,7 @@ No bullet numbering. Separate insights with a blank line.
 
 
 def _get_ai_insights(records: list[dict], risks: list[dict], scorecards: list[dict]) -> str:
-    """Try OpenAI then Ollama for strategic insights. Returns empty string on failure."""
+    """Use Ollama for strategic insights. Returns empty string on failure."""
     overall   = build_overall_summary(records)
     months    = get_months_available(records)
     projects  = build_projects(records)
@@ -1235,12 +1198,6 @@ def _get_ai_insights(records: list[dict], risks: list[dict], scorecards: list[di
         scorecard_text="\n".join(sc_lines) or "None",
     )
 
-    if _is_openai_available():
-        try:
-            return _openai_generate(prompt, timeout=60).strip()
-        except Exception as e:
-            print(f"[risk_engine] OpenAI insight failed: {e}")
-
     if is_ollama_available():
         try:
             return _ollama_generate(prompt, timeout=90).strip()
@@ -1267,7 +1224,7 @@ def get_risks_and_recommendations(
         time_range:         "1M" | "3M" | "6M" | "1Y" | None (all)
         max_items:          max risks / recommendations in summary lists
         include_positive:   whether to include STAR/CONSISTENT signals
-        include_ai_insights: whether to call OpenAI/Ollama for strategic insights
+        include_ai_insights: whether to call Ollama for strategic insights
 
     Returns:
         {
