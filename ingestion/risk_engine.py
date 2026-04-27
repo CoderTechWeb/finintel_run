@@ -1136,6 +1136,205 @@ def _build_employee_scorecards(timelines: dict[str, list[dict]]) -> list[dict]:
     return cards
 
 
+def _risk_impact_value(risk: dict) -> float:
+    """Best-effort monetary impact estimate from risk metrics."""
+    t = risk.get("type", "")
+    m = risk.get("metrics") or {}
+
+    if t == "LOSS_MAKING_PROJECT":
+        return abs(_num(m.get("profit")))
+    if t == "LOSS_MAKING_EMPLOYEE":
+        return abs(_num(m.get("total_profit") or m.get("profit")))
+    if t == "BENCH_RISK":
+        return abs(_num(m.get("bench_cost")))
+    if t == "LOW_UTILISATION":
+        return abs(_num(m.get("estimated_rev_gap")))
+    if t == "HIGH_LEAVE":
+        return abs(_num(m.get("estimated_revenue_impact")))
+    return 0.0
+
+
+def _build_financial_exposure(risks: list[dict]) -> dict:
+    """Aggregate monetary exposure estimates for executive reporting."""
+    components = {
+        "loss_making_projects": 0.0,
+        "loss_making_employees": 0.0,
+        "bench_cost": 0.0,
+        "low_utilisation_gap": 0.0,
+        "high_leave_impact": 0.0,
+    }
+
+    for r in risks:
+        t = r.get("type", "")
+        m = r.get("metrics") or {}
+        if t == "LOSS_MAKING_PROJECT":
+            components["loss_making_projects"] += abs(_num(m.get("profit")))
+        elif t == "LOSS_MAKING_EMPLOYEE":
+            components["loss_making_employees"] += abs(_num(m.get("total_profit") or m.get("profit")))
+        elif t == "BENCH_RISK":
+            components["bench_cost"] += abs(_num(m.get("bench_cost")))
+        elif t == "LOW_UTILISATION":
+            components["low_utilisation_gap"] += abs(_num(m.get("estimated_rev_gap")))
+        elif t == "HIGH_LEAVE":
+            components["high_leave_impact"] += abs(_num(m.get("estimated_revenue_impact")))
+
+    total = round(sum(components.values()), 2)
+    return {
+        "estimated_total": total,
+        "components": {k: round(v, 2) for k, v in components.items()},
+    }
+
+
+def _build_project_risk_heatmap(risks: list[dict]) -> list[dict]:
+    """Risk concentration by project for HR/leadership triage."""
+    buckets: dict[str, dict] = {}
+    for r in risks:
+        if r.get("severity") == "positive":
+            continue
+        project = (r.get("project") or "Unknown").strip() or "Unknown"
+        sev = r.get("severity", "medium")
+        if project not in buckets:
+            buckets[project] = {
+                "project": project,
+                "total_risks": 0,
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+            }
+        buckets[project]["total_risks"] += 1
+        if sev in ("critical", "high", "medium", "low"):
+            buckets[project][sev] += 1
+
+    rows = list(buckets.values())
+    rows.sort(key=lambda x: (x["critical"], x["high"], x["total_risks"]), reverse=True)
+    return rows
+
+
+def _build_data_quality_summary(records: list[dict]) -> dict:
+    """Compute data completeness and confidence for risk interpretation."""
+    if not records:
+        return {
+            "confidence": "LOW",
+            "completeness_pct": 0.0,
+            "missing_fields": {},
+            "notes": "No records available for risk analysis.",
+        }
+
+    tracked_fields = [
+        "employee", "project", "month", "actual_hours",
+        "billing_rate", "cost_rate", "revenue", "cost", "profit", "utilisation_pct",
+    ]
+
+    missing: dict[str, int] = {f: 0 for f in tracked_fields}
+    for r in records:
+        for f in tracked_fields:
+            v = r.get(f)
+            if v is None or v == "":
+                missing[f] += 1
+
+    total_cells = len(records) * len(tracked_fields)
+    missing_cells = sum(missing.values())
+    completeness = (1.0 - (missing_cells / max(total_cells, 1))) * 100
+
+    if completeness >= 95:
+        confidence = "HIGH"
+    elif completeness >= 85:
+        confidence = "MEDIUM"
+    else:
+        confidence = "LOW"
+
+    top_missing = {k: v for k, v in sorted(missing.items(), key=lambda kv: kv[1], reverse=True) if v > 0}
+
+    return {
+        "confidence": confidence,
+        "completeness_pct": round(completeness, 1),
+        "missing_fields": top_missing,
+        "notes": (
+            "Risk confidence is derived from completeness of critical financial and utilisation fields."
+        ),
+    }
+
+
+def _build_action_tracker(recommendations: list[dict]) -> list[dict]:
+    """Transform recommendations into trackable execution items."""
+    target_days = {"IMMEDIATE": 7, "SHORT_TERM": 30, "LONG_TERM": 90}
+    tracker = []
+    for i, rec in enumerate(recommendations, start=1):
+        pr = rec.get("priority", "SHORT_TERM")
+        tracker.append({
+            "id": f"ACT-{i:03d}",
+            "action": rec.get("action", ""),
+            "owner": rec.get("owner", "TBD"),
+            "category": rec.get("category", "general"),
+            "priority": pr,
+            "status": "OPEN",
+            "target_days": target_days.get(pr, 30),
+            "related_risk_type": rec.get("related_risk_type", ""),
+        })
+    return tracker
+
+
+def _build_explainability_sources(risks: list[dict], limit: int = 12) -> list[dict]:
+    """Provide compact evidence snippets for top risks."""
+    sources = []
+    for r in risks[:limit]:
+        m = r.get("metrics") or {}
+        evidence = {}
+        for k in (
+            "total_profit", "profit", "avg_margin_pct", "margin_pct", "avg_utilisation_pct",
+            "consecutive_overload_months", "consecutive_bench_months", "leave_pct_latest",
+            "billable_drop_pct", "bench_cost", "estimated_rev_gap", "months",
+        ):
+            if k in m and m.get(k) is not None:
+                evidence[k] = m.get(k)
+
+        sources.append({
+            "risk_type": r.get("type", ""),
+            "entity": r.get("entity", ""),
+            "project": r.get("project", ""),
+            "severity": r.get("severity", ""),
+            "evidence": evidence,
+        })
+    return sources
+
+
+def _build_executive_summary(risks: list[dict], recommendations: list[dict]) -> dict:
+    """Build C-level summary: highest risks, exposure, and execution pressure."""
+    non_positive = [r for r in risks if r.get("severity") != "positive"]
+    critical_high = [r for r in non_positive if r.get("severity") in ("critical", "high")]
+
+    top_items = []
+    for r in critical_high[:5]:
+        top_items.append({
+            "type": r.get("type", ""),
+            "entity": r.get("entity", ""),
+            "project": r.get("project", ""),
+            "severity": r.get("severity", ""),
+            "priority": r.get("priority", ""),
+            "owner": r.get("owner", ""),
+            "deadline": r.get("deadline", ""),
+            "estimated_impact": round(_risk_impact_value(r), 2),
+        })
+
+    repeated = {}
+    for r in non_positive:
+        key = f"{r.get('type','')}::{r.get('entity','')}"
+        repeated[key] = repeated.get(key, 0) + 1
+    recurring_count = sum(1 for _, c in repeated.items() if c > 1)
+
+    return {
+        "top_critical_actions": top_items,
+        "financial_exposure": _build_financial_exposure(non_positive),
+        "execution_load": {
+            "total_recommendations": len(recommendations),
+            "immediate_actions": sum(1 for r in recommendations if r.get("priority") == "IMMEDIATE"),
+            "short_term_actions": sum(1 for r in recommendations if r.get("priority") == "SHORT_TERM"),
+            "recurring_signals": recurring_count,
+        },
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 9 — AI strategic insights layer (Ollama)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1316,8 +1515,15 @@ def get_risks_and_recommendations(
     for r in all_risks:
         r.pop("_score", None)
 
+    action_tracker = _build_action_tracker(recommendations)
+    executive_summary = _build_executive_summary(all_risks, recommendations)
+    data_quality = _build_data_quality_summary(records)
+    project_risk_heatmap = _build_project_risk_heatmap(all_risks)
+    explainability_sources = _build_explainability_sources(all_risks)
+
     return {
         "overview":            _build_risk_overview(all_risks),
+        "executive_summary":   executive_summary,
         "risks":               all_risks,
         "financial_risks":     financial_risks[:limit],
         "workforce_risks":     workforce_risks[:limit],
@@ -1325,6 +1531,10 @@ def get_risks_and_recommendations(
         "positive_signals":    positive_signals,
         "trend_insights":      trend_risks,
         "recommendations":     recommendations,
+        "action_tracker":      action_tracker,
+        "project_risk_heatmap": project_risk_heatmap,
+        "data_quality":        data_quality,
+        "sources":             explainability_sources,
         "employee_scorecards": scorecards,
         "ai_insights":         ai_insights,
         "summary":             overall,
@@ -1341,6 +1551,12 @@ def get_risks_and_recommendations(
 def _empty_response() -> dict:
     return {
         "overview":            {"total_risks": 0, "action_needed": 0, "by_severity": {}, "by_category": {}},
+        "executive_summary":   {
+            "top_critical_actions": [],
+            "financial_exposure": {"estimated_total": 0.0, "components": {}},
+            "execution_load": {"total_recommendations": 0, "immediate_actions": 0,
+                                "short_term_actions": 0, "recurring_signals": 0},
+        },
         "risks":               [],
         "financial_risks":     [],
         "workforce_risks":     [],
@@ -1348,6 +1564,11 @@ def _empty_response() -> dict:
         "positive_signals":    [],
         "trend_insights":      [],
         "recommendations":     [],
+        "action_tracker":      [],
+        "project_risk_heatmap": [],
+        "data_quality":        {"confidence": "LOW", "completeness_pct": 0.0,
+                                 "missing_fields": {}, "notes": "No records available for risk analysis."},
+        "sources":             [],
         "employee_scorecards": [],
         "ai_insights":         "",
         "summary":             {},

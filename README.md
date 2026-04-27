@@ -8,7 +8,6 @@
 - Python 3.13 or later
 - `uv` installed
 - Ollama installed and running locally if you want to use the Q&A and risk recommendation features
-- OpenAI API key if you want risks/recommendations to be fully AI-generated via OpenAI
 
 Check your Python version:
 
@@ -120,25 +119,13 @@ The ingestion flow supports:
 - If you get dependency import errors, run `uv sync` again.
 - If Q&A responses fail, make sure Ollama is running.
 
-### Configure OpenAI for AI-generated risks/recommendations
-
-Set your API key as an environment variable before starting the app:
-
-```bash
-export OPENAI_API_KEY="your_openai_api_key"
-```
-
-Optional model override:
-
-```bash
-export OPENAI_MODEL="gpt-4o-mini"
-```
+### AI behavior (current)
 
 Notes:
 
-- `GET /risks-recommendations` uses OpenAI when `OPENAI_API_KEY` is present.
-- If the OpenAI call fails or no key is set, it gracefully falls back to rule-based risk logic.
-- Q&A still uses Ollama (`POST /ask`).
+- `GET /risks-recommendations` uses Ollama for `ai_insights`.
+- If Ollama is unavailable, insights return empty text and rule-based risks/recommendations still return.
+- Q&A uses Ollama (`POST /ask`).
 - `GET /risks-recommendations` now also returns compact grouped fields: `overview`, `risk_groups`, `recommendation_groups`, `top_risks`, and `top_recommendations`.
 - Use query param `max_items` (default `8`, range `3-20`) to control compact list sizes.
 
