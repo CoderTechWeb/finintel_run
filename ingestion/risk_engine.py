@@ -1454,6 +1454,7 @@ def get_risks_and_recommendations(
     max_items: int = 8,
     include_positive: bool = True,
     include_ai_insights: bool = True,
+    project: Optional[str] = None,
 ) -> dict:
     """
     Main entry point. Returns a complete risk and recommendation report.
@@ -1485,6 +1486,8 @@ def get_risks_and_recommendations(
 
     if time_range:
         records = filter_by_range(records, time_range)
+    if project:
+        records = [r for r in records if r.get("project", "").strip().lower() == project.strip().lower()]
     if not records:
         return _empty_response()
 
@@ -1560,6 +1563,13 @@ def get_risks_and_recommendations(
     project_risk_heatmap = _build_project_risk_heatmap(all_risks)
     explainability_sources = _build_explainability_sources(all_risks)
 
+    # ── Projects at risk ──────────────────────────────────────────────────
+    projects_at_risk = sorted({
+        r["project"]
+        for r in action_risks
+        if r.get("project")
+    })
+
     return {
         "overview":            _build_risk_overview(all_risks),
         "executive_summary":   executive_summary,
@@ -1577,6 +1587,7 @@ def get_risks_and_recommendations(
         "employee_scorecards": scorecards,
         "ai_insights":         ai_insights,
         "summary":             overall,
+        "projects_at_risk":    projects_at_risk,
         "meta": {
             "time_range":        time_range or "ALL",
             "total_employees":   len(timelines),
@@ -1604,6 +1615,7 @@ def _empty_response() -> dict:
         "trend_insights":      [],
         "recommendations":     [],
         "action_tracker":      [],
+        "projects_at_risk":    [],
         "project_risk_heatmap": [],
         "data_quality":        {"confidence": "LOW", "completeness_pct": 0.0,
                                  "missing_fields": {}, "notes": "No records available for risk analysis."},

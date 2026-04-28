@@ -236,8 +236,9 @@ def get_employees(time_range: Optional[str] = Query(None, alias="range"), projec
 def risks_and_recommendations(
     time_range: Optional[str] = Query(None, alias="range"),
     max_items: int = Query(8, ge=3, le=20),
+    project: Optional[str] = Query(None),
 ):
-    return get_risks_and_recommendations(time_range=time_range, max_items=max_items)
+    return get_risks_and_recommendations(time_range=time_range, max_items=max_items, project=project)
 
 
 # ── POST /ask — Natural language Q&A (LLM-powered) ──────────────────────
