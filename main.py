@@ -233,8 +233,11 @@ def get_employees(time_range: Optional[str] = Query(None, alias="range"), projec
 
 # ── GET /risks-recommendations — Risk analysis + AI recommendations ──────
 @app.get("/risks-recommendations")
-def risks_and_recommendations(time_range: Optional[str] = Query(None, alias="range")):
-    return get_risks_and_recommendations(time_range=time_range)
+def risks_and_recommendations(
+    time_range: Optional[str] = Query(None, alias="range"),
+    max_items: int = Query(8, ge=3, le=20),
+):
+    return get_risks_and_recommendations(time_range=time_range, max_items=max_items)
 
 
 # ── POST /ask — Natural language Q&A (LLM-powered) ──────────────────────
