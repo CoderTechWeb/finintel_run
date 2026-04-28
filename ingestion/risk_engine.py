@@ -46,6 +46,7 @@ AI layer (optional):
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import date
 from typing import Optional
@@ -389,11 +390,12 @@ def _detect_employee_risks(name: str, monthly_records: list[dict], overall_reven
             "owner":    "Account Manager + Finance",
             "deadline": "Next contract renewal or rate review",
             "metrics": {
-                "avg_margin_pct": round(avg_margin, 2),
-                "target_margin":  THRESHOLDS["margin_employee_low"],
-                "gap_pct":        round(gap, 2),
-                "billing_rate":   billing_rate,
-                "cost_rate":      cost_rate,
+                "avg_margin_pct":  round(avg_margin, 2),
+                "target_margin":   THRESHOLDS["margin_employee_low"],
+                "gap_pct":         round(gap, 2),
+                "billing_rate":    billing_rate,
+                "cost_rate":       cost_rate,
+                "profit_recovery": round(total_rev * (gap / 100), 2),
             },
             "linked_employees": [name],
             "revenue_contribution_pct": revenue_pct,
@@ -417,7 +419,7 @@ def _detect_employee_risks(name: str, monthly_records: list[dict], overall_reven
                 ),
                 "recommendation": (
                     f"Negotiate billing rate for {name} from ${billing_rate:.0f}/h to "
-                    f"at least ${cost_rate * THRESHOLDS['rate_gap_min']:.0f}/h "
+                    f"at least ${math.ceil(cost_rate * THRESHOLDS['rate_gap_min'])}/h "
                     f"to maintain a minimum {_pct((THRESHOLDS['rate_gap_min']-1)*100)} buffer."
                 ),
                 "owner":    "Account Manager",
@@ -1130,7 +1132,7 @@ def _build_employee_scorecards(timelines: dict[str, list[dict]]) -> list[dict]:
             "performance":     perf,
             "total_revenue":   round(sum(_num(r.get("revenue")) for r in records), 2),
             "total_profit":    round(sum(_num(r.get("revenue")) - _num(r.get("cost")) for r in records), 2),
-            "avg_utilisation": round(sum(_num(r.get("utilisation_pct")) for r in records) / max(len(records),1), 1),
+            "avg_utilisation": round(perf["inputs"]["utilisation_pct"], 1),
         })
     cards.sort(key=lambda c: c["performance"]["score"], reverse=True)
     return cards
@@ -1177,6 +1179,9 @@ def _build_financial_exposure(risks: list[dict]) -> dict:
             components["low_utilisation_gap"] += abs(_num(m.get("estimated_rev_gap")))
         elif t == "HIGH_LEAVE":
             components["high_leave_impact"] += abs(_num(m.get("estimated_revenue_impact")))
+        elif t in ("LOW_MARGIN_EMPLOYEE", "LOW_MARGIN_PROJECT"):
+            components.setdefault("low_margin_gap", 0.0)
+            components["low_margin_gap"] += abs(_num(m.get("profit_recovery") or m.get("revenue", 0) * _num(m.get("gap_pct", 0)) / 100))
 
     total = round(sum(components.values()), 2)
     return {
@@ -1346,19 +1351,18 @@ You are FinIntel AI, a senior HR and financial analytics advisor.
 Dataset summary:
 {summary}
 
-Top 10 risks detected:
+Top risks detected:
 {risk_text}
 
 Employee scorecards:
 {scorecard_text}
 
-Write exactly 3 strategic management insights in plain English.
-Each insight must:
-- Be 1–2 sentences
-- Include a specific number from the data
-- Tell management what to DO, not just what is happening
-- Be addressed to a senior HR or Finance leader
-No bullet numbering. Separate insights with a blank line.
+Write exactly 3 strategic management insights. Rules:
+- Each insight is exactly 2 sentences: sentence 1 = current problem with a specific number, sentence 2 = 30-day forecast if unaddressed.
+- Use direct imperative language ("Raise", "Escalate", "Freeze") — never "I recommend" or "I suggest".
+- Start each insight with the action owner: "Finance:", "HR:", or "Account Manager:".
+- Only use numbers that appear in the data above. Do not invent figures.
+Separate insights with a blank line. No bullet points. No headers. No closing remarks.
 """
 
 
@@ -1399,11 +1403,46 @@ def _get_ai_insights(records: list[dict], risks: list[dict], scorecards: list[di
 
     if is_ollama_available():
         try:
-            return _ollama_generate(prompt, timeout=90).strip()
+            raw = _ollama_generate(prompt, timeout=90).strip()
+            if raw:
+                return _clean_ai_output(raw)
         except Exception as e:
             print(f"[risk_engine] Ollama insight failed: {e}")
 
     return ""
+
+
+# Filler phrases that start a line but add no insight value
+_FILLER_OPENERS = (
+    "here are", "certainly", "sure,", "as you", "as we", "based on",
+    "below are", "the following", "i will", "let me", "in conclusion",
+    "in summary", "to summarize", "overall,", "please note", "note that",
+    "i hope", "feel free", "if you", "note:", "disclaimer",
+    "i recommend", "i suggest", "i would",
+)
+
+
+def _clean_ai_output(text: str) -> str:
+    """Strip llama3 preamble headers and trailing filler from AI output."""
+    lines = text.splitlines()
+
+    # Drop leading filler lines (regardless of whether they end with punctuation)
+    while lines:
+        first = lines[0].strip().lower()
+        if any(first.startswith(p) for p in _FILLER_OPENERS):
+            lines = lines[1:]
+        else:
+            break
+
+    # Drop trailing filler lines
+    while lines:
+        last = lines[-1].strip().lower()
+        if any(last.startswith(p) for p in _FILLER_OPENERS):
+            lines = lines[:-1]
+        else:
+            break
+
+    return "\n".join(lines).strip()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
