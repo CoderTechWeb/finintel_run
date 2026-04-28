@@ -1422,11 +1422,17 @@ _FILLER_OPENERS = (
 )
 
 
+_CATEGORY_PREFIXES = re.compile(
+    r"^\s*(finance|hr|operations?|workforce|operational|financial|risk|insight|action)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
 def _clean_ai_output(text: str) -> str:
-    """Strip llama3 preamble headers and trailing filler from AI output."""
+    """Strip llama3 preamble headers, category prefixes, and trailing filler from AI output."""
     lines = text.splitlines()
 
-    # Drop leading filler lines (regardless of whether they end with punctuation)
+    # Drop leading filler lines
     while lines:
         first = lines[0].strip().lower()
         if any(first.startswith(p) for p in _FILLER_OPENERS):
@@ -1441,6 +1447,12 @@ def _clean_ai_output(text: str) -> str:
             lines = lines[:-1]
         else:
             break
+
+    # Strip category prefixes (e.g. "Finance: ...", "HR: ...")
+    lines = [_CATEGORY_PREFIXES.sub("", l) for l in lines]
+
+    # Collapse blank lines — join non-empty lines with single newline
+    lines = [l for l in lines if l.strip()]
 
     return "\n".join(lines).strip()
 
@@ -1514,16 +1526,12 @@ def get_risks_and_recommendations(
         r["priority"] = _priority_from_score(r["_score"])
 
     all_risks = _sort_risks(all_risks)
-
-    # Filter by include_positive
-    if not include_positive:
-        all_risks = [r for r in all_risks if r.get("severity") != "positive"]
+    all_risks = [r for r in all_risks if r.get("severity") != "positive"]
 
     # ── Categorise ────────────────────────────────────────────────────────
-    financial_risks   = [r for r in all_risks if r["category"] == "financial"    and r.get("severity") != "positive"]
-    workforce_risks   = [r for r in all_risks if r["category"] == "workforce"    and r.get("severity") != "positive"]
-    operational_risks = [r for r in all_risks if r["category"] == "operational"  and r.get("severity") != "positive"]
-    positive_signals  = [r for r in all_risks if r.get("severity") == "positive"]
+    financial_risks   = [r for r in all_risks if r["category"] == "financial"]
+    workforce_risks   = [r for r in all_risks if r["category"] == "workforce"]
+    operational_risks = [r for r in all_risks if r["category"] == "operational"]
 
     # ── Trend insights (already detected above as risk items) ─────────────
     trend_types   = {"DECLINING_MARGIN_TREND", "RISING_COST_TREND", "FALLING_UTILISATION_TREND"}
@@ -1577,7 +1585,6 @@ def get_risks_and_recommendations(
         "financial_risks":     financial_risks[:limit],
         "workforce_risks":     workforce_risks[:limit],
         "operational_risks":   operational_risks[:limit],
-        "positive_signals":    positive_signals,
         "trend_insights":      trend_risks,
         "recommendations":     recommendations,
         "action_tracker":      action_tracker,
@@ -1611,11 +1618,9 @@ def _empty_response() -> dict:
         "financial_risks":     [],
         "workforce_risks":     [],
         "operational_risks":   [],
-        "positive_signals":    [],
         "trend_insights":      [],
         "recommendations":     [],
         "action_tracker":      [],
-        "projects_at_risk":    [],
         "project_risk_heatmap": [],
         "data_quality":        {"confidence": "LOW", "completeness_pct": 0.0,
                                  "missing_fields": {}, "notes": "No records available for risk analysis."},
