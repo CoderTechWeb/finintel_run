@@ -10,8 +10,10 @@ import re
 from .dataset import (
     GLOBAL_DATASET, build_projects, build_monthly, build_overall_summary,
     build_top_performers, build_risks, get_months_available, filter_by_range,
+    build_employee_summaries
 )
-from .ai_mapper import _ollama_generate, is_ollama_available
+from .ai_mapper import _ollama_generate, is_ollama_available, _extract_json
+from .forecast import try_answer_forecast
 
 
 # ── Context builder ──────────────────────────────────────────────────────────
@@ -28,6 +30,7 @@ def _build_dataset_context(records=None):
     monthly = build_monthly(recs)
     top = build_top_performers(recs, limit=5)
     risks = build_risks(recs)
+    employee_summaries = build_employee_summaries(recs)
 
     lines = []
 
@@ -36,6 +39,7 @@ def _build_dataset_context(records=None):
     lines.append(f"Total Revenue: ${overall['total_revenue']:,.2f}")
     lines.append(f"Total Cost: ${overall['total_cost']:,.2f}")
     lines.append(f"Total Profit: ${overall['total_profit']:,.2f}")
+    lines.append(f"Total Hours Worked: {overall.get('total_hours', 0)}")
     lines.append(f"Avg Margin: {overall['avg_margin_pct']}%")
     lines.append(f"Total Employees: {overall['total_employees']}")
     lines.append(f"Months: {', '.join(months)}")
@@ -47,6 +51,7 @@ def _build_dataset_context(records=None):
         lines.append(
             f"- {name}: Revenue=${data['revenue']:,.2f}, "
             f"Cost=${data['cost']:,.2f}, Profit=${data['profit']:,.2f}, "
+            f"Avg Utilisation={data.get('avg_utilisation', 0)}%, "
             f"Employees={data['employees']}"
         )
     lines.append("")
@@ -61,12 +66,24 @@ def _build_dataset_context(records=None):
         )
     lines.append("")
 
+    # Employee Totals
+    lines.append("=== EMPLOYEE ALL-TIME TOTALS ===")
+    for emp in employee_summaries:
+        lines.append(
+            f"- {emp['employee_name']}: Total Revenue=${emp['total_revenue']:,.2f}, "
+            f"Total Profit=${emp['total_profit']:,.2f}, Total Hours={emp['total_hours']}, "
+            f"Utilisation={emp['utilization_pct'] or 0}%"
+        )
+    lines.append("")
+
     # Per-employee detail
-    lines.append("=== EMPLOYEE DETAILS ===")
+    lines.append("=== EMPLOYEE MONTHLY DETAILS ===")
     for r in recs:
         lines.append(
-            f"- {r.get('employee', '?')} | Project: {r.get('project', '?')} | "
-            f"Month: {r.get('month', '?')} | Hours: {r.get('actual_hours', 0)} | "
+            f"- {r.get('employee', '?')} | Proj: {r.get('project', '?')} | "
+            f"Month: {r.get('month', '?')} | "
+            f"ActualHrs: {r.get('actual_hours', 0)} | BillableHrs: {r.get('billable_hours', 0)} | "
+            f"WorkDays: {r.get('working_days', 0)} | Vacation: {r.get('vacation_days', 0)} | "
             f"BillRate: {r.get('billing_rate', 0)} | CostRate: {r.get('cost_rate', 0)} | "
             f"Revenue: {r.get('revenue', 0)} | Cost: {r.get('cost', 0)} | "
             f"Profit: {r.get('profit', 0)} | Margin: {r.get('margin_pct', 0)}% | "
@@ -95,50 +112,34 @@ def _build_dataset_context(records=None):
 # ── Prompt template ──────────────────────────────────────────────────────────
 
 _QA_PROMPT = """\
-You are FinIntel AI, a financial data analyst assistant. You answer questions \
-about uploaded timesheet and financial data.
+You are FinIntel AI, a financial data analyst assistant. Answer questions based ONLY on the provided dataset context.
 
 Here is the current dataset:
-
 {context}
 
 ---
-
 User question: {question}
 
-Instructions:
-- Answer using ONLY the dataset above.
-- Do NOT infer, generalize, summarize, or combine records unless the user explicitly asks for a summary or aggregation.
-- Do NOT use phrases like "multiple months", "appears", "indicates", "suggests", or any similar interpretive wording unless that exact conclusion is directly supported by the data and requested by the user.
-- Do not repeat the user’s question.
-- Do not restate or paraphrase the question.
-- Start directly with the answer.
-- For superlative questions like highest, lowest, max, minimum, return only the record(s) tied for the extreme value.
-- If the question asks who, which employee, which month, or similar, answer with the exact matching rows from the dataset.
-- If an employee appears in more than one month, list each employee-month separately unless the user explicitly asks for grouped results.
-- If the question asks "how many", "count", "number of", or "total number of", return a count first, not a row dump.
-- For count questions about employees, count unique employee names unless the user explicitly asks for employee-month records, rows, entries, or occurrences.
-- For count questions about projects, count unique project names unless the user explicitly asks for rows, entries, or occurrences.
-- If the question is ambiguous, prefer the business entity count rather than the row count.
-- Do not mix unique counts with row counts in the same answer unless the user asks for both.
-- If helpful, after the count you may list the unique names included in that count on the same line or in a short plain-text continuation.
-- If there are no matching rows, say that no matching records were found in the provided data.
-- If the data does not contain enough information to answer, say so plainly.
-- Be concise and precise. Use exact employee names, project names, months, numbers, currency, and percentages from the data.
-- Format currency as $X,XXX.XX and percentages as X.X%.
-- When comparing values, show both values side by side.
-- Do not explain what the numbers mean unless the user explicitly asks for analysis.
-- Prefer bullet points for lists.
-- Do not start the answer with phrases like "Based on the dataset", "Based on the provided data", "From the data", or similar lead-ins.
-- Do not output escaped newline characters like \n or \t.
-- Do not use markdown emphasis such as **bold**, *italic*, headings, or code fences.
-- Return plain text only.
+INSTRUCTIONS:
+You MUST return your answer as a valid, strictly formatted JSON object. Do not include any markdown formatting like ```json or outside text.
 
-Output rules:
-- For aggregated questions, show the calculation result only if it can be read or computed directly from the provided data.
-- For count questions, prefer formats like:
-  <N> employees are underutilized.
-  <N> unique employees are underutilized: <Name1>, <Name2>, <Name3>.
+JSON SCHEMA:
+{{
+  "summary": "A clear, conversational 1-2 sentence answer to the user's question.",
+  "visual_type": "table", // Choose exactly one: "table", "metric", "bar_chart", or "text"
+  "columns": ["col1", "col2"], // Provide column keys if visual_type is 'table' or 'bar_chart'. Use lowercase keys.
+  "data": [
+      // If visual_type is "table" or "bar_chart": output an array of objects matching the columns.
+      // If visual_type is "metric": output exactly one object like {{"label": "Total Revenue", "value": "$100,000"}}
+      // If visual_type is "text": output an empty array []
+  ]
+}}
+
+RULES:
+1. "visual_type" must be "metric" for single numbers/counts (e.g., Total Revenue, Employee count).
+2. "visual_type" must be "table" for lists, top/bottom performers, or grouped data.
+3. For "table", ensure the keys in the "data" objects exactly match the strings in "columns".
+4. Never make up data. If no data matches, set visual_type to "text" and explain in "summary".
 """
 
 
@@ -153,13 +154,89 @@ def _clean_answer(text: str) -> str:
     # Remove echoed question lines like 'User question: ...' or a repeated question at the start
     answer = re.sub(r"(?im)^\s*(user question|question)\s*:\s*.*?$", "", answer)
     answer = re.sub(r"(?im)^\s*(which|who|what|how many|how much|count|show|list)\b.*?[?:]?\s*$", "", answer)
-    answer = answer
-    answer = answer
+    answer = re.sub(r"(?m)^\s*\d+[.)]\s*", "- ", answer)
+    answer = re.sub(r"(?m)^\s*[•*]\s*", "- ", answer)
+    answer = re.sub(r"(?m);\s+(?=[^-].*\|)", "\n- ", answer)
     answer = re.sub(r"\n{3,}", "\n\n", answer)
     answer = re.sub(r"[ \t]+\n", "\n", answer)
-    answer = answer
     answer = re.sub(r"\s{2,}", " ", answer)
     return answer.strip()
+
+
+def _to_float_num(s: str):
+    try:
+        txt = (s or "").strip()
+        txt = txt.replace("$", "").replace(",", "").replace("%", "").strip()
+        if not txt:
+            return None
+        return float(txt)
+    except Exception:
+        return None
+
+
+def _extract_rows(text: str):
+    rows = []
+    if not text:
+        return rows
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if "|" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        row = {}
+        for idx, part in enumerate(parts):
+            if ":" in part:
+                key, val = part.split(":", 1)
+                k = key.strip().lower()
+                v = val.strip()
+                if k == "month":
+                    row["month"] = v
+                elif k == "project":
+                    row["project"] = v
+                elif k == "revenue":
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["revenue"] = fv
+                elif k == "cost":
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["cost"] = fv
+                elif k == "profit":
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["profit"] = fv
+                elif k in ("utilization", "utilisation"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["utilization_pct"] = fv
+                elif k in ("hours", "hrs"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["hours"] = fv
+                elif k.startswith("margin"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["margin_pct"] = fv
+                elif k.replace(" ", "") in ("billrate", "billingrate"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["billing_rate"] = fv
+                elif k.replace(" ", "") in ("costrate", "costperhour"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["cost_rate"] = fv
+                else:
+                    row[k] = v
+            else:
+                if idx == 0 and "employee" not in row:
+                    row["employee"] = part
+        if any(k in row for k in ("employee", "month", "project", "revenue", "cost", "profit", "utilization_pct", "hours", "margin_pct")):
+            rows.append(row)
+    return rows
 
 
 # ── Main Q&A function ───────────────────────────────────────────────────────
@@ -168,24 +245,45 @@ def ask(question: str, time_range: str = None) -> dict:
     """
     Answer a natural-language question about the dataset.
 
-    Returns: {"answer": str, "sources": dict}
+    Returns: {"summary": str, "visual_type": str, "columns": list, "data": list, "sources": dict}
     """
     records = GLOBAL_DATASET
     if not records:
         return {
-            "answer": "No data loaded. Please upload timesheets first via POST /ingest.",
-            "sources": [],
+            "summary": "No data loaded. Please upload timesheets first via POST /ingest.",
+            "visual_type": "text",
+            "columns": [],
+            "data": [],
+            "sources": {},
         }
 
     # Apply time range filter if specified
     if time_range:
         records = filter_by_range(records, time_range)
 
+    # Forecast intent: answer deterministic estimates for future-looking questions
+    fc_answer = try_answer_forecast(question, records)
+    if fc_answer is not None:
+        return {
+            "summary": fc_answer,
+            "visual_type": "text",
+            "columns": [],
+            "data": [],
+            "sources": {
+                "total_records": len(records),
+                "months": get_months_available(records),
+                "time_range": time_range or "ALL",
+            },
+        }
+
     # Check Ollama availability
     if not is_ollama_available():
         return {
-            "answer": "LLM service (Ollama) is not running. Please start it with: ollama serve",
-            "sources": [],
+            "summary": "LLM service (Ollama) is not running. Please start it with: ollama serve",
+            "visual_type": "text",
+            "columns": [],
+            "data": [],
+            "sources": {},
         }
 
     # Build context and prompt
@@ -193,19 +291,38 @@ def ask(question: str, time_range: str = None) -> dict:
     prompt = _QA_PROMPT.format(context=context, question=question)
 
     try:
-        answer = _ollama_generate(prompt, timeout=120)
+        raw_response = _ollama_generate(prompt, timeout=120)
     except Exception as e:
         return {
-            "answer": f"LLM query failed: {str(e)}",
-            "sources": [],
+            "summary": f"LLM query failed: {str(e)}",
+            "visual_type": "text",
+            "columns": [],
+            "data": [],
+            "sources": {},
         }
 
-    # Return answer with metadata
+    # Parse the JSON from the LLM
+    parsed_json = _extract_json(raw_response)
+    
+    # Fallback if LLM fails to return valid JSON
+    if not parsed_json:
+        parsed_json = {
+            "summary": _clean_answer(raw_response),
+            "visual_type": "text",
+            "data": [],
+            "columns": []
+        }
+
+    # Construct the final, UI-friendly payload
     return {
-        "answer": _clean_answer(answer),
+        "summary": parsed_json.get("summary", ""),
+        "visual_type": parsed_json.get("visual_type", "text"),
+        "columns": parsed_json.get("columns", []),
+        "data": parsed_json.get("data", []),
         "sources": {
             "total_records": len(records),
             "months": get_months_available(records),
             "time_range": time_range or "ALL",
-        },
+        }
     }
+

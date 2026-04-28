@@ -202,17 +202,24 @@ def build_projects(records: List[dict]) -> dict:
         if proj not in projects:
             projects[proj] = {
                 "revenue": 0, "cost": 0, "profit": 0,
+                "hours": 0.0, "approved_hours": 0.0,
                 "employees": set(),
             }
         projects[proj]["revenue"] += r.get("revenue") or 0
         projects[proj]["cost"] += r.get("cost") or 0
         projects[proj]["profit"] += r.get("profit") or 0
+        projects[proj]["hours"] += _to_num(r.get("actual_hours"))
+        projects[proj]["approved_hours"] += _to_num(r.get("expected_hours") if r.get("expected_hours") is not None else r.get("max_hours"))
         projects[proj]["employees"].add(r.get("employee", ""))
 
     for p in projects.values():
         p["revenue"] = round(p["revenue"], 2)
         p["cost"] = round(p["cost"], 2)
         p["profit"] = round(p["profit"], 2)
+        if p["approved_hours"] > 0:
+            p["avg_utilisation"] = round((p["hours"] / p["approved_hours"]) * 100, 2)
+        else:
+            p["avg_utilisation"] = 0
         p["employees"] = len(p["employees"])
 
     return projects
