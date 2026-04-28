@@ -14,6 +14,7 @@ from .dataset import (
 )
 from .ai_mapper import _ollama_generate, is_ollama_available, _extract_json
 from .forecast import try_answer_forecast
+from .forecast_ import try_answer_forecast as try_answer_forecast_ai
 
 
 # ── Context builder ──────────────────────────────────────────────────────────
@@ -166,10 +167,15 @@ def _clean_answer(text: str) -> str:
 def _to_float_num(s: str):
     try:
         txt = (s or "").strip()
+        # Remove common decorations, keep signs and decimals
         txt = txt.replace("$", "").replace(",", "").replace("%", "").strip()
         if not txt:
             return None
-        return float(txt)
+        # Extract the first numeric token (handles leading text like "... (±2.0pp)")
+        m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", txt)
+        if not m:
+            return None
+        return float(m.group(0))
     except Exception:
         return None
 
@@ -195,6 +201,16 @@ def _extract_rows(text: str):
                 v = val.strip()
                 if k == "month":
                     row["month"] = v
+                elif k.replace(" ", "") in ("monthno", "month_no"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["month_no"] = int(round(fv))
+                elif k == "quarter":
+                    row["quarter"] = v
+                elif k.replace(" ", "") in ("quarterno", "quarterno", "quarter_no", "qno"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["quarter_no"] = int(round(fv))
                 elif k == "project":
                     row["project"] = v
                 elif k == "revenue":
@@ -209,6 +225,10 @@ def _extract_rows(text: str):
                     fv = _to_float_num(v)
                     if fv is not None:
                         row["profit"] = fv
+                elif k == "headcount":
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["headcount"] = int(round(fv))
                 elif k in ("utilization", "utilisation"):
                     fv = _to_float_num(v)
                     if fv is not None:
@@ -217,6 +237,22 @@ def _extract_rows(text: str):
                     fv = _to_float_num(v)
                     if fv is not None:
                         row["hours"] = fv
+                elif k in ("leaves", "leave", "pto", "time off", "timeoff"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["leave_days"] = fv
+                elif k in ("vacation", "vacations"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["vacation_days"] = fv
+                elif k in ("holidays", "holiday"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["holiday_days"] = fv
+                elif k.replace(" ", "") in ("workingdays", "workdays", "workdayscount"):
+                    fv = _to_float_num(v)
+                    if fv is not None:
+                        row["working_days"] = fv
                 elif k.startswith("margin"):
                     fv = _to_float_num(v)
                     if fv is not None:
@@ -238,6 +274,98 @@ def _extract_rows(text: str):
             rows.append(row)
     return rows
 
+
+def _forecast_table_name(header: str) -> str:
+    # Convert headers like "Estimate — Q3 2026 —" to a concise table name: "Forecast — Q3 2026"
+    if not header:
+        return "Forecast"
+    m = re.search(r"(?i)estimate\s+—\s*(.*?)\s*—", header)
+    if m:
+        core = m.group(1).strip()
+        return f"Forecast — {core}"
+    # Fallback: replace leading "Estimate" if present
+    header2 = re.sub(r"(?i)^estimate\s+—\s*", "Forecast — ", header).strip()
+    return header2 or "Forecast"
+
+
+def _concise_table_name_from_summary(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    if not s:
+        return "Results"
+    # Limit length for a compact table title
+    if len(s) > 80:
+        s = s[:80].rstrip()
+    if not re.match(r"(?i)^(forecast|results)\s+—\s*", s):
+        s = f"Results — {s}"
+    return s
+
+
+def _llm_table_name(summary: str, columns, data) -> str:
+    cols = [str(c or "").strip() for c in (columns or [])]
+    cols_l = [c.lower() for c in cols]
+    # Detect entity dimension
+    entity_map = {
+        "employee": "Employees",
+        "project": "Projects",
+        "month": "Months",
+        "quarter": "Quarters",
+        "department": "Departments",
+        "client": "Clients",
+        "team": "Teams",
+    }
+    entity = None
+    for k, v in entity_map.items():
+        if k in cols_l:
+            entity = v
+            break
+    # Detect metric
+    metric_aliases = [
+        ("utilization", "Utilization"), ("utilisation", "Utilization"),
+        ("profit", "Profit"), ("revenue", "Revenue"), ("cost", "Cost"),
+        ("hours", "Hours"), ("hrs", "Hours"),
+        ("leave", "Leaves"), ("leaves", "Leaves"), ("pto", "Leaves"),
+        ("vacation", "Vacation"), ("holidays", "Holidays"), ("holiday", "Holidays"),
+        ("working days", "Working Days"), ("working_days", "Working Days"), ("workdays", "Working Days"),
+        ("margin", "Margin"), ("margin_pct", "Margin"),
+    ]
+    metric = None
+    for key, label in metric_aliases:
+        if key in cols_l:
+            metric = label
+            break
+    # Ranking detection
+    s = (summary or "").strip()
+    m = re.search(r"(?i)\b(top|highest|bottom|lowest)\b\s*(\d+)?", s)
+    rank_word = None
+    n = None
+    if m:
+        w = m.group(1).lower()
+        if w in ("top", "highest"):
+            rank_word = "Top"
+        elif w in ("bottom", "lowest"):
+            rank_word = "Bottom"
+        if m.group(2):
+            try:
+                n = int(m.group(2))
+            except Exception:
+                n = None
+    if n is None and isinstance(data, list) and 1 <= len(data) <= 50:
+        # Heuristic: if a small list is returned and rank was implied, use its size
+        if re.search(r"(?i)\b(top|highest|bottom|lowest)\b", s):
+            n = len(data)
+    # Build title
+    if rank_word and n and (entity or metric):
+        if entity and metric:
+            return f"{rank_word} {n} — {entity} by {metric}"
+        return f"{rank_word} {n} — {entity or metric}"
+    if entity and metric:
+        return f"Results — {metric} by {entity}"
+    if entity:
+        return f"Results — {entity}"
+    if metric:
+        return f"Results — {metric}"
+    return _concise_table_name_from_summary(summary)
 
 # ── Main Q&A function ───────────────────────────────────────────────────────
 
@@ -261,20 +389,51 @@ def ask(question: str, time_range: str = None) -> dict:
     if time_range:
         records = filter_by_range(records, time_range)
 
-    # Forecast intent: answer deterministic estimates for future-looking questions
-    fc_answer = try_answer_forecast(question, records)
+    # Forecast intent: prefer AI forecaster, then fallback to deterministic
+    fc_answer = try_answer_forecast_ai(question, records)
+    if fc_answer is None:
+        fc_answer = try_answer_forecast(question, records)
     if fc_answer is not None:
-        return {
-            "summary": fc_answer,
-            "visual_type": "text",
-            "columns": [],
-            "data": [],
-            "sources": {
-                "total_records": len(records),
-                "months": get_months_available(records),
-                "time_range": time_range or "ALL",
-            },
-        }
+        rows = _extract_rows(fc_answer)
+        if rows:
+            preferred_cols = [
+                "month_no", "month", "quarter_no", "quarter",
+                "project", "employee",
+                "revenue", "cost", "profit", "headcount", "utilization_pct",
+                "leave_days", "vacation_days", "holiday_days", "working_days", "hours",
+            ]
+            present = []
+            for c in preferred_cols:
+                if any(c in r for r in rows):
+                    present.append(c)
+            data = [{k: r.get(k) for k in present} for r in rows]
+            header = fc_answer.splitlines()[0].strip()
+            table_name = _forecast_table_name(header)
+            return {
+                "summary": table_name,
+                "visual_type": "table",
+                "columns": present,
+                "data": data,
+                "sources": {
+                    "total_records": len(records),
+                    "months": get_months_available(records),
+                    "time_range": time_range or "ALL",
+                    "forecast": True,
+                },
+            }
+        else:
+            return {
+                "summary": fc_answer,
+                "visual_type": "text",
+                "columns": [],
+                "data": [],
+                "sources": {
+                    "total_records": len(records),
+                    "months": get_months_available(records),
+                    "time_range": time_range or "ALL",
+                    "forecast": True,
+                },
+            }
 
     # Check Ollama availability
     if not is_ollama_available():
@@ -313,16 +472,21 @@ def ask(question: str, time_range: str = None) -> dict:
             "columns": []
         }
 
+    visual_type = parsed_json.get("visual_type", "text")
+    summary_text = parsed_json.get("summary", "")
+    if visual_type == "table":
+        summary_text = _llm_table_name(summary_text, parsed_json.get("columns", []), parsed_json.get("data", []))
     # Construct the final, UI-friendly payload
     return {
-        "summary": parsed_json.get("summary", ""),
-        "visual_type": parsed_json.get("visual_type", "text"),
+        "summary": summary_text,
+        "visual_type": visual_type,
         "columns": parsed_json.get("columns", []),
         "data": parsed_json.get("data", []),
         "sources": {
             "total_records": len(records),
             "months": get_months_available(records),
             "time_range": time_range or "ALL",
+            "forecast": False,
         }
     }
 

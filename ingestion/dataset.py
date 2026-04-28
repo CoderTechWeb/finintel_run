@@ -233,11 +233,18 @@ def build_monthly(records: List[dict]) -> dict:
             monthly[m] = {
                 "total_revenue": 0, "total_cost": 0, "total_profit": 0,
                 "employees": set(),
+                "leave_days": 0.0, "vacation_days": 0.0, "holiday_days": 0.0,
+                "working_days": 0.0, "total_hours": 0.0,
             }
         monthly[m]["total_revenue"] += r.get("revenue") or 0
         monthly[m]["total_cost"] += r.get("cost") or 0
         monthly[m]["total_profit"] += r.get("profit") or 0
         monthly[m]["employees"].add(r.get("employee", ""))
+        monthly[m]["leave_days"] += (r.get("leave_days") or 0)
+        monthly[m]["vacation_days"] += (r.get("vacation_days") or 0)
+        monthly[m]["holiday_days"] += (r.get("holiday_days") or 0)
+        monthly[m]["working_days"] += (r.get("working_days") or 0)
+        monthly[m]["total_hours"] += (r.get("actual_hours") or 0)
 
     for v in monthly.values():
         v["total_revenue"] = round(v["total_revenue"], 2)
@@ -247,6 +254,11 @@ def build_monthly(records: List[dict]) -> dict:
         pft = v["total_profit"]
         v["avg_margin_pct"] = round((pft / rev) * 100, 2) if rev > 0 else 0
         v["employees"] = len(v["employees"])
+        v["leave_days"] = round(v["leave_days"], 2)
+        v["vacation_days"] = round(v["vacation_days"], 2)
+        v["holiday_days"] = round(v["holiday_days"], 2)
+        v["working_days"] = round(v["working_days"], 2)
+        v["total_hours"] = round(v["total_hours"], 2)
 
     return monthly
 
