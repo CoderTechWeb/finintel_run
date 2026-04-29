@@ -77,6 +77,74 @@ def _last_n_snapshot(months: List[str], series: Dict[str, List[float]], n: int =
     return out
 
 
+def _extract_requested_employees(question: str) -> List[str]:
+    if not question:
+        return []
+    out: List[str] = []
+    # Capture phrases like 'employee John Doe', 'employee: Jane', 'for employee Mark'
+    for m in re.finditer(r"(?i)\bemployee\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        stop_words = [
+            " for ", " in ", " by ", " with ", " on ", " during ", " next ",
+            " revenue", " cost", " profit", " utilisation", " utilization",
+            " headcount", " leaves", " vacation", " holidays", " hours", " working",
+            ",", "|", "\n"
+        ]
+        low = " " + raw.lower() + " "
+        cuts = [low.find(tok) for tok in stop_words if low.find(tok) >= 0]
+        if cuts:
+            cut = min(cuts)
+            cleaned = low[1:cut].strip(" .,:;|-")
+        else:
+            cleaned = raw.strip(" .,:;|-")
+        if cleaned:
+            out.append(cleaned)
+    return out
+
+
+def _extract_freeform_targets(question: str) -> List[str]:
+    if not question:
+        return []
+    out: List[str] = []
+    # Phrases like 'for Maersk', 'for John Doe'
+    for m in re.finditer(r"(?i)\bfor\s+([a-z0-9 .&/_-]{1,60})", question):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        stop_words = [
+            " for ", " in ", " by ", " with ", " on ", " during ", " next ",
+            ",", "|", "\n"
+        ]
+        low = " " + raw.lower() + " "
+        cuts = [low.find(tok) for tok in stop_words if low.find(tok) >= 0]
+        if cuts:
+            cut = min(cuts)
+            cleaned = low[1:cut].strip(" .,:;|-")
+        else:
+            cleaned = raw.strip(" .,:;|-")
+        # Filter out obvious time/metric words
+        discard = False
+        kws = [
+            "next", "month", "months", "quarter", "quarters", "q1", "q2", "q3", "q4",
+            "revenue", "profit", "cost", "utilisation", "utilization", "hours", "leaves", "vacation", "holidays",
+        ]
+        # Month names
+        kws += [
+            "jan", "january", "feb", "february", "mar", "march", "apr", "april", "may",
+            "jun", "june", "jul", "july", "aug", "august", "sep", "sept", "september",
+            "oct", "october", "nov", "november", "dec", "december"
+        ]
+        if cleaned and len(cleaned) >= 2:
+            for kw in kws:
+                if kw in cleaned.lower():
+                    discard = True
+                    break
+            if not discard:
+                out.append(cleaned)
+    return out
+
 def _llm_advise_settings(question: str, months: List[str], series: Dict[str, List[float]]) -> Optional[dict]:
     if not is_ollama_available():
         return None
@@ -351,6 +419,39 @@ def _detect_scope(question: str, records: List[dict]) -> Tuple[str, List[str]]:
         return ("employee", sorted(set(target_employees)))
 
     return ("overall", [])
+
+
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _extract_requested_projects(question: str) -> List[str]:
+    if not question:
+        return []
+    out: List[str] = []
+    # Capture phrases like 'project Maersk', 'project: Astral', 'for project Optium'
+    for m in re.finditer(r"(?i)\bproject\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            continue
+        # Trim trailing qualifiers
+        stop_words = [
+            " for ", " in ", " by ", " with ", " on ", " during ", " next ",
+            " revenue", " cost", " profit", " utilisation", " utilization",
+            " headcount", " leaves", " vacation", " holidays", " hours", " working",
+            ",", "|", "\n"
+        ]
+        low = " " + raw.lower() + " "
+        cuts = [low.find(tok) for tok in stop_words if low.find(tok) >= 0]
+        if cuts:
+            cut = min(cuts)
+            # remove the leading added space and cut position
+            cleaned = low[1:cut].strip(" .,:;|-")
+        else:
+            cleaned = raw.strip(" .,:;|-")
+        if cleaned:
+            out.append(cleaned)
+    return out
 
 
 def _lin_forecast(values: List[float], steps: int) -> List[float]:
@@ -752,6 +853,63 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
         metrics = ["revenue", "profit", "headcount", "utilization"]
 
     scope, targets = _detect_scope(q, recs)
+    # Extra: if a concrete 'project X' was asked, try to map to known projects; if no match, stop early
+    req_projects = _extract_requested_projects(question)
+    if req_projects:
+        known_projects = _distinct_values(recs, "project")
+        kp_norm = { _norm_key(p): p for p in known_projects }
+        matched: List[str] = []
+        for rp in req_projects:
+            nn = _norm_key(rp)
+            # exact norm match
+            if nn in kp_norm:
+                matched.append(kp_norm[nn])
+            else:
+                # fuzzy contains
+                for kn, orig in kp_norm.items():
+                    if nn and (nn in kn or kn in nn):
+                        matched.append(orig)
+        matched = sorted(set(matched))
+        if not matched:
+            return f"Project not found\n- No matching project for '{', '.join(req_projects)}'"
+        scope = "project"
+        targets = matched
+
+    # Extra: explicit employee guard
+    req_employees = _extract_requested_employees(question)
+    if req_employees:
+        known_emps = _distinct_values(recs, "employee")
+        ke_norm = { _norm_key(e): e for e in known_emps }
+        matched_e: List[str] = []
+        for re_emp in req_employees:
+            nn = _norm_key(re_emp)
+            if nn in ke_norm:
+                matched_e.append(ke_norm[nn])
+            else:
+                for kn, orig in ke_norm.items():
+                    if nn and (nn in kn or kn in nn):
+                        matched_e.append(orig)
+        matched_e = sorted(set(matched_e))
+        if not matched_e:
+            return f"Employee not found\n- No matching employee for '{', '.join(req_employees)}'"
+        scope = "employee"
+        targets = matched_e
+
+    # Extra: freeform 'for <name>' guard — if exactly one target mentioned and it doesn't match any known entity, stop early
+    free_targets = _extract_freeform_targets(question)
+    if len(free_targets) == 1 and not (req_projects or req_employees):
+        token = free_targets[0]
+        known_projects = _distinct_values(recs, "project")
+        known_emps = _distinct_values(recs, "employee")
+        kp_norm = { _norm_key(p): p for p in known_projects }
+        ke_norm = { _norm_key(e): e for e in known_emps }
+        nn = _norm_key(token)
+        exists = nn in kp_norm or nn in ke_norm
+        if not exists:
+            # also try contains
+            exists = any(nn in k for k in kp_norm.keys()) or any(nn in k for k in ke_norm.keys())
+        if not exists:
+            return f"Target not found\n- '{token}' does not match any project or employee in the dataset."
 
     # LLM guidance (overall snapshot)
     overall_series = _build_overall_series(recs)
@@ -772,11 +930,21 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
         group_type = None
     elif scope == "project":
         all_series = _series_by_group(recs, "project")
-        series_map = {k: v for k, v in all_series.items() if (not targets or k in set(targets))}
+        if targets:
+            series_map = {k: v for k, v in all_series.items() if k in set(targets)}
+            if not series_map:
+                return "Project not found\n- No matching project in dataset for the requested query."
+        else:
+            series_map = all_series
         group_type = "project"
     else:
         all_series = _series_by_group(recs, "employee")
-        series_map = {k: v for k, v in all_series.items() if (not targets or k in set(targets))}
+        if targets:
+            series_map = {k: v for k, v in all_series.items() if k in set(targets)}
+            if not series_map:
+                return "Employee not found\n- No matching employee in dataset for the requested query."
+        else:
+            series_map = all_series
         group_type = "employee"
 
     lines: List[str] = []
