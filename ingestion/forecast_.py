@@ -1,7 +1,14 @@
 import math
 import re
+import os
 import datetime as dt
 from typing import List, Dict, Optional, Tuple
+
+DEBUG_FORECAST = os.environ.get("DEBUG_FORECAST", "").lower() in ("1", "true", "yes")
+
+def _debug(msg: str):
+    if DEBUG_FORECAST:
+        print(f"[forecast_ DEBUG] {msg}")
 
 from .dataset import (
     build_monthly,
@@ -81,10 +88,18 @@ def _extract_requested_employees(question: str) -> List[str]:
     if not question:
         return []
     out: List[str] = []
+    # Skip if asking for all/each employees (not a specific name)
+    q_lower = question.lower()
+    if any(phrase in q_lower for phrase in ["each employee", "all employee", "every employee", "per employee", "by employee"]):
+        return []
+    
     # Capture phrases like 'employee John Doe', 'employee: Jane', 'for employee Mark'
-    for m in re.finditer(r"(?i)\bemployee\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
+    for m in re.finditer(r"(?i)\bemployees?\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
         raw = (m.group(1) or "").strip()
         if not raw:
+            continue
+        # Skip generic words that aren't names
+        if raw.lower() in ("each", "all", "every", "the", "for", "in", "by", "with", "s"):
             continue
         stop_words = [
             " for ", " in ", " by ", " with ", " on ", " during ", " next ",
@@ -99,7 +114,8 @@ def _extract_requested_employees(question: str) -> List[str]:
             cleaned = low[1:cut].strip(" .,:;|-")
         else:
             cleaned = raw.strip(" .,:;|-")
-        if cleaned:
+        # Skip if cleaned result is a generic word
+        if cleaned and cleaned.lower() not in ("each", "all", "every", "the", "for", "in", "by", "with", "s"):
             out.append(cleaned)
     return out
 
@@ -152,39 +168,106 @@ def _llm_parse_question(question: str, known_projects: List[str], known_employee
     """
     if not is_ollama_available():
         return None
-    prompt = f"""You are a financial data assistant. Analyze this question and extract structured parameters for forecasting.
+    prompt = f"""You are a financial data assistant. Determine if this question is asking for a FUTURE FORECAST or just querying EXISTING/HISTORICAL data.
 
 Question: "{question}"
 
-Known projects in dataset: {', '.join(known_projects[:20]) if known_projects else 'None'}
-Known employees in dataset: {', '.join(known_employees[:20]) if known_employees else 'None'}
+CRITICAL: is_forecast=true ONLY if the question explicitly asks about FUTURE predictions using words like:
+- "forecast", "predict", "projection", "estimate", "expected"
+- "next month", "next quarter", "next 3 months", "upcoming"
+- Future dates beyond current data (e.g., "July 2026", "Q3 2026")
+
+is_forecast=false for questions about:
+- Current or past data: "total revenue", "show employees", "top performers", "which project", "how many"
+- Comparisons: "compare", "difference between"
+- Lists/rankings: "top 5", "highest", "lowest", "list all"
+- Aggregations: "total", "average", "sum", "count"
+
+EXAMPLES:
+- "What is the total revenue?" → is_forecast=false (asking about existing data)
+- "Top 5 employees by utilization" → is_forecast=false (ranking existing data)
+- "Show me Astral project details" → is_forecast=false (querying existing data)
+- "Forecast revenue for next quarter" → is_forecast=true (future prediction)
+- "Predict profit for July 2026" → is_forecast=true (future prediction)
+- "What will be the revenue next month?" → is_forecast=true (future prediction)
 
 Return ONLY valid JSON (no markdown, no explanation):
 {{
   "is_forecast": true or false,
-  "metrics": ["revenue", "profit", "leaves", "hours", "utilization", "cost", "headcount", "vacation", "holidays", "working_days"],
-  "scope": "overall" or "project" or "employee",
-  "targets": ["Project or Employee Name", ...],
-  "horizon_type": "months" or "quarters" or "explicit_months" or "explicit_quarter",
-  "horizon_value": 3,
-  "explicit_periods": ["July 2026", "Q3 2026", ...]
+  "metrics": [],
+  "scope": "overall",
+  "targets": [],
+  "horizon_type": "",
+  "horizon_value": null,
+  "explicit_periods": []
 }}
 
-Rules:
-1. is_forecast=true if the question asks about future predictions, forecasts, estimates, projections, or expected values.
-2. metrics: list only the metrics mentioned or implied. Use lowercase keys.
-3. scope: "project" if asking about specific project(s), "employee" if about specific employee(s), else "overall".
-4. targets: list the project or employee names mentioned. Match to known names if possible.
-5. horizon_type: "months" for "next N months", "quarters" for "next N quarters", "explicit_months" for specific months like "July 2026", "explicit_quarter" for "Q3 2026".
-6. horizon_value: the number of months or quarters requested (e.g., 3 for "next 3 months").
-7. explicit_periods: list specific periods mentioned (e.g., ["July 2026", "August 2026"] or ["Q3 2026"]).
-8. If no metrics specified, return empty list for metrics.
-9. If not a forecast question, set is_forecast=false and leave other fields empty/default.
+If is_forecast=true, also fill in:
+- metrics: ["revenue", "profit", "leaves", "hours", "utilization", "cost", "headcount", "vacation", "holidays", "working_days"]
+- scope: "overall" or "project" or "employee"
+- targets: project or employee names from: {', '.join(known_projects[:15]) if known_projects else 'None'}, {', '.join(known_employees[:15]) if known_employees else 'None'}
+- horizon_type: "months" or "quarters" or "explicit_months" or "explicit_quarter"
+- horizon_value: number of months/quarters
+- explicit_periods: specific periods like ["July 2026", "Q3 2026"]
 """
     try:
         raw = _ollama_generate(prompt, timeout=30)
+        _debug(f"LLM raw response: {raw[:500] if raw else 'None'}...")
         parsed = _extract_json(raw)
         if isinstance(parsed, dict):
+            _debug(f"LLM parsed: is_forecast={parsed.get('is_forecast')}, metrics={parsed.get('metrics')}, scope={parsed.get('scope')}, targets={parsed.get('targets')}")
+            # Extra sanity check: if LLM says forecast but question has no forecast cues, override
+            if parsed.get("is_forecast") is True:
+                q_lower = question.lower()
+                
+                # Explicit forecast keywords - these MUST be present for a forecast
+                has_forecast_cue = any(w in q_lower for w in [
+                    "forecast", "predict", "projection", "estimate", "expected",
+                    "next month", "next quarter", "upcoming", "coming month",
+                    "will be", "would be", "going to be"
+                ]) or bool(re.search(r"next\s+\d+\s*(months?|quarters?)", q_lower))
+                
+                # If no explicit forecast keyword, it's NOT a forecast
+                # Just mentioning a date like "Feb 2026" doesn't make it a forecast
+                if not has_forecast_cue:
+                    _debug("Overriding is_forecast to False (no explicit forecast keywords)")
+                    parsed["is_forecast"] = False
+                else:
+                    # Has forecast cue - check if mentioned dates are actually in the future
+                    month_matches = re.findall(r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*(20\d{2})", q_lower)
+                    quarter_matches = re.findall(r"(?i)q([1-4])\s*(20\d{2})", q_lower)
+                    
+                    if month_matches or quarter_matches:
+                        # Get the last month in the dataset to compare
+                        from .dataset import get_months_available, GLOBAL_DATASET
+                        available_months = get_months_available(GLOBAL_DATASET)
+                        if available_months:
+                            last_month = _parse_month_date(available_months[-1])
+                            if last_month:
+                                # Check if ALL mentioned dates are within existing data
+                                all_in_past = True
+                                for mon_name, year in month_matches:
+                                    mon_map = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+                                    mon_num = mon_map.get(mon_name[:3].lower(), 0)
+                                    if mon_num:
+                                        mentioned_date = dt.date(int(year), mon_num, 1)
+                                        if mentioned_date > last_month:
+                                            all_in_past = False
+                                            break
+                                if all_in_past:
+                                    for qtr, year in quarter_matches:
+                                        qtr_month = (int(qtr) - 1) * 3 + 1
+                                        mentioned_date = dt.date(int(year), qtr_month, 1)
+                                        if mentioned_date > last_month:
+                                            all_in_past = False
+                                            break
+                                
+                                # If asking to "forecast" a past date, it's actually a Q&A
+                                if all_in_past and not any(w in q_lower for w in ["next", "upcoming", "coming"]):
+                                    _debug("Overriding is_forecast to False (all mentioned dates are in existing data)")
+                                    parsed["is_forecast"] = False
+                
+                _debug(f"Sanity check result: is_forecast={parsed.get('is_forecast')}")
             return parsed
     except Exception as exc:
         print(f"[forecast_] LLM question parsing failed: {exc}")
@@ -475,10 +558,18 @@ def _extract_requested_projects(question: str) -> List[str]:
     if not question:
         return []
     out: List[str] = []
+    # Skip if asking for all/each projects (not a specific name)
+    q_lower = question.lower()
+    if any(phrase in q_lower for phrase in ["each project", "all project", "every project", "per project", "by project"]):
+        return []
+    
     # Capture phrases like 'project Maersk', 'project: Astral', 'for project Optium'
-    for m in re.finditer(r"(?i)\bproject\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
+    for m in re.finditer(r"(?i)\bprojects?\s*[:\-]?\s*([a-z0-9 .&/_-]{1,60})", question):
         raw = (m.group(1) or "").strip()
         if not raw:
+            continue
+        # Skip generic words that aren't names
+        if raw.lower() in ("each", "all", "every", "the", "for", "in", "by", "with", "s"):
             continue
         # Trim trailing qualifiers
         stop_words = [
@@ -495,7 +586,8 @@ def _extract_requested_projects(question: str) -> List[str]:
             cleaned = low[1:cut].strip(" .,:;|-")
         else:
             cleaned = raw.strip(" .,:;|-")
-        if cleaned:
+        # Skip if cleaned result is a generic word
+        if cleaned and cleaned.lower() not in ("each", "all", "every", "the", "for", "in", "by", "with", "s"):
             out.append(cleaned)
     return out
 
@@ -789,35 +881,44 @@ def _format_month_line(idx: int, label: str, metrics: List[str], fmap: Dict[str,
                        adj_map: Optional[Dict[str, Dict[str, dict]]] = None) -> str:
     parts: List[str] = []
     adj_map = adj_map or {}
+    
+    def _safe_get(arr: List[float], idx: int) -> float:
+        """Safely get value from array, return last value if out of bounds."""
+        if not arr:
+            return 0.0
+        if idx < len(arr):
+            return arr[idx]
+        return arr[-1]  # Use last value if out of bounds
+    
     if "revenue" in metrics and fmap.get("revenue"):
-        v = _apply_adjustment(fmap['revenue'][step_idx], 'revenue', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['revenue'], step_idx), 'revenue', label, adj_map)
         parts.append(f"Revenue: {_fmt_money(_clamp_nonneg(v))}")
     if "cost" in metrics and fmap.get("cost"):
-        v = _apply_adjustment(fmap['cost'][step_idx], 'cost', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['cost'], step_idx), 'cost', label, adj_map)
         parts.append(f"Cost: {_fmt_money(_clamp_nonneg(v))}")
     if "profit" in metrics and fmap.get("profit"):
-        v = _apply_adjustment(fmap['profit'][step_idx], 'profit', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['profit'], step_idx), 'profit', label, adj_map)
         parts.append(f"Profit: {_fmt_money(_clamp_nonneg(v))}")
     if "headcount" in metrics and fmap.get("headcount"):
-        v = _apply_adjustment(fmap['headcount'][step_idx], 'headcount', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['headcount'], step_idx), 'headcount', label, adj_map)
         parts.append(f"Headcount: {_fmt_int(_clamp_nonneg(v))}")
     if "utilization" in metrics and fmap.get("utilization"):
-        v = _apply_adjustment(fmap['utilization'][step_idx], 'utilization', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['utilization'], step_idx), 'utilization', label, adj_map)
         parts.append(f"Utilization: {_fmt_pct(_clamp_pct(v))}")
     if "leave_days" in metrics and fmap.get("leave_days"):
-        v = _apply_adjustment(fmap['leave_days'][step_idx], 'leave_days', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['leave_days'], step_idx), 'leave_days', label, adj_map)
         parts.append(f"Leaves: {_fmt_int(_clamp_nonneg(v))}")
     if "vacation_days" in metrics and fmap.get("vacation_days"):
-        v = _apply_adjustment(fmap['vacation_days'][step_idx], 'vacation_days', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['vacation_days'], step_idx), 'vacation_days', label, adj_map)
         parts.append(f"Vacation: {_fmt_int(_clamp_nonneg(v))}")
     if "holiday_days" in metrics and fmap.get("holiday_days"):
-        v = _apply_adjustment(fmap['holiday_days'][step_idx], 'holiday_days', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['holiday_days'], step_idx), 'holiday_days', label, adj_map)
         parts.append(f"Holidays: {_fmt_int(_clamp_nonneg(v))}")
     if "working_days" in metrics and fmap.get("working_days"):
-        v = _apply_adjustment(fmap['working_days'][step_idx], 'working_days', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['working_days'], step_idx), 'working_days', label, adj_map)
         parts.append(f"WorkingDays: {_fmt_int(_clamp_nonneg(v))}")
     if "total_hours" in metrics and fmap.get("total_hours"):
-        v = _apply_adjustment(fmap['total_hours'][step_idx], 'total_hours', label, adj_map)
+        v = _apply_adjustment(_safe_get(fmap['total_hours'], step_idx), 'total_hours', label, adj_map)
         parts.append(f"Hours: {_fmt_int(_clamp_nonneg(v))}")
     lead = f"- Month: {label}"
     if group_type and group_name:
@@ -919,12 +1020,15 @@ def _parse_llm_explicit_periods(periods: List[str], base: dt.date) -> Tuple[List
 
 
 def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[str]:
+    _debug(f"try_answer_forecast called with question: '{question}'")
     q = (question or "").lower()
     recs = records if records is not None else GLOBAL_DATASET
     if not recs:
+        _debug("No records available, returning None")
         return None
     months = get_months_available(recs)
     if not months:
+        _debug("No months available, returning insufficient data message")
         return "Insufficient historical data to estimate a forecast."
     last_label = months[-1]
     base = _parse_month_date(last_label) or dt.date.today().replace(day=1)
@@ -932,12 +1036,20 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
     # Collect known entities for LLM context
     known_projects = _distinct_values(recs, "project")
     known_emps = _distinct_values(recs, "employee")
+    _debug(f"Known projects: {known_projects[:5]}..., Known employees: {known_emps[:5]}...")
 
     # --- LLM-based question parsing (primary) ---
     llm_parsed = _llm_parse_question(question, known_projects, known_emps)
     use_llm = llm_parsed and llm_parsed.get("is_forecast") is True
+    _debug(f"LLM parsing result: use_llm={use_llm}")
+    
+    # If LLM explicitly says NOT a forecast, trust it and go to Q&A
+    if llm_parsed and llm_parsed.get("is_forecast") is False:
+        _debug("LLM says not a forecast, returning None (will go to Q&A)")
+        return None
 
     if use_llm:
+        _debug("Using LLM-parsed parameters for forecast")
         # Extract parameters from LLM response
         llm_metrics = _map_llm_metrics(llm_parsed.get("metrics") or [])
         llm_scope = (llm_parsed.get("scope") or "overall").lower()
@@ -1012,6 +1124,7 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
 
     else:
         # --- Regex-based fallback (when LLM unavailable or says not a forecast) ---
+        _debug("Using regex-based fallback for intent detection")
         months_n = _select_months_count(q)
         quarters_n = _select_quarters_count(q)
         explicit_quarter = _find_target_quarter(q)
@@ -1022,7 +1135,9 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
             or any(w in q for w in ["expected", "projected", "future", "futuristic"]) \
             or any(p in q for p in ["next month", "next quarter", "next months", "upcoming months", "coming months"]) \
             or bool(re.search(r"(?i)next\s+\d+\s*(months?|qtrs?|quarters?)\b", q))
+        _debug(f"Regex intent check: intent={intent}, months_n={months_n}, quarters_n={quarters_n}")
         if not intent:
+            _debug("No forecast intent detected, returning None (will go to Q&A)")
             return None
 
         metrics = _select_metrics(question)
@@ -1089,11 +1204,42 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
 
     def _forecast_for_series(series: Dict[str, List[float]], steps: int) -> Dict[str, List[float]]:
         out: Dict[str, List[float]] = {}
-        for key in ["revenue", "cost", "profit", "headcount", "utilization", "leave_days", "vacation_days", "holiday_days", "working_days", "total_hours"]:
+        # Forecast revenue and cost first
+        for key in ["revenue", "cost", "headcount", "utilization", "leave_days", "vacation_days", "holiday_days", "working_days", "total_hours"]:
             vals = series.get(key, [])
             if not vals:
                 continue
             out[key] = _forecast_values_with_guidance(vals, steps, key, cfg)
+        
+        # Calculate profit as revenue - cost
+        if "revenue" in out and "cost" in out:
+            raw_profit = [r - c for r, c in zip(out["revenue"], out["cost"])]
+            
+            # Check if profit margin is reasonable compared to historical
+            hist_rev = series.get("revenue", [])
+            hist_cost = series.get("cost", [])
+            if hist_rev and hist_cost and len(hist_rev) == len(hist_cost):
+                hist_profit = [r - c for r, c in zip(hist_rev, hist_cost)]
+                total_hist_rev = sum(r for r in hist_rev if r > 0)
+                total_hist_profit = sum(p for p in hist_profit)
+                hist_margin = (total_hist_profit / total_hist_rev) if total_hist_rev > 0 else 0.1
+                
+                # If forecasted margin deviates too much from historical, adjust
+                adjusted_profit = []
+                for i, (r, p) in enumerate(zip(out["revenue"], raw_profit)):
+                    forecast_margin = (p / r) if r > 0 else 0
+                    # If margin drops below 50% of historical or goes negative, use historical margin
+                    if forecast_margin < hist_margin * 0.5 or forecast_margin < 0:
+                        adjusted_profit.append(max(0.0, r * hist_margin))
+                    else:
+                        adjusted_profit.append(max(0.0, p))
+                out["profit"] = adjusted_profit
+            else:
+                out["profit"] = [max(0.0, p) for p in raw_profit]
+        elif "profit" in series and series["profit"]:
+            # Fallback: forecast profit directly if revenue/cost not available
+            out["profit"] = _forecast_values_with_guidance(series["profit"], steps, "profit", cfg)
+        
         return out
 
     if scope == "overall":

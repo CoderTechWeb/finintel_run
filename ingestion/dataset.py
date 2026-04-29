@@ -11,6 +11,22 @@ from typing import Optional, List
 _LOCK = threading.Lock()
 GLOBAL_DATASET: List[dict] = []
 
+# Callback for cache invalidation (set by qa_engine to avoid circular import)
+_ON_DATASET_CHANGE_CALLBACK = None
+
+def set_on_dataset_change_callback(callback):
+    """Register a callback to be called when dataset changes."""
+    global _ON_DATASET_CHANGE_CALLBACK
+    _ON_DATASET_CHANGE_CALLBACK = callback
+
+def _notify_dataset_change():
+    """Notify listeners that dataset has changed."""
+    if _ON_DATASET_CHANGE_CALLBACK:
+        try:
+            _ON_DATASET_CHANGE_CALLBACK()
+        except Exception:
+            pass
+
 MONTH_ORDER = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -68,6 +84,7 @@ def clear():
         GLOBAL_DATASET.clear()
         _FILES_PROCESSED.clear()
         _DEDUP_KEYS.clear()
+    _notify_dataset_change()
 
 
 def append_records(records: List[dict], filename: str = ""):
@@ -104,10 +121,12 @@ def append_records(records: List[dict], filename: str = ""):
 
         if skipped:
             print(f"[dataset] Skipped {skipped} records with missing employee name")
+    _notify_dataset_change()
 
 
 def remove_by_file(filename: str) -> int:
     """Remove all records from a specific source file. Returns count removed."""
+    removed = 0
     with _LOCK:
         before = len(GLOBAL_DATASET)
         remaining = [r for r in GLOBAL_DATASET if r.get("_source_file") != filename]
@@ -123,7 +142,8 @@ def remove_by_file(filename: str) -> int:
             _DEDUP_KEYS.add((_normalize_key(emp), _normalize_key(mon), _normalize_key(proj)))
         if filename in _FILES_PROCESSED:
             _FILES_PROCESSED.remove(filename)
-        return removed
+    _notify_dataset_change()
+    return removed
 
 
 def get_files_processed() -> List[str]:
