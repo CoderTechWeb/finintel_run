@@ -13,8 +13,7 @@ from .dataset import (
     build_employee_summaries
 )
 from .ai_mapper import _ollama_generate, is_ollama_available, _extract_json
-from .forecast import try_answer_forecast
-from .forecast_ import try_answer_forecast as try_answer_forecast_ai
+from .forecast_ import try_answer_forecast
 
 
 # ── Context builder ──────────────────────────────────────────────────────────
@@ -389,10 +388,8 @@ def ask(question: str, time_range: str = None) -> dict:
     if time_range:
         records = filter_by_range(records, time_range)
 
-    # Forecast intent: prefer AI forecaster, then fallback to deterministic
-    fc_answer = try_answer_forecast_ai(question, records)
-    if fc_answer is None:
-        fc_answer = try_answer_forecast(question, records)
+    # Forecast intent: use AI forecaster (forecast_.py) only
+    fc_answer = try_answer_forecast(question, records)
     if fc_answer is not None:
         rows = _extract_rows(fc_answer)
         if rows:
