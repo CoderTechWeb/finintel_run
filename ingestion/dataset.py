@@ -396,6 +396,7 @@ def build_employee_summaries(records: List[dict]) -> List[dict]:
             employees[employee_name] = {
                 "hours": 0.0,
                 "revenue": 0.0,
+                "cost": 0.0,
                 "profit": 0.0,
                 "approved_hours": 0.0,
                 "projects": {},
@@ -404,6 +405,7 @@ def build_employee_summaries(records: List[dict]) -> List[dict]:
         emp = employees[employee_name]
         emp["hours"] += hours
         emp["revenue"] += revenue
+        emp["cost"] += cost
         emp["profit"] += profit
         emp["approved_hours"] += approved_hours
 
@@ -451,7 +453,9 @@ def build_employee_summaries(records: List[dict]) -> List[dict]:
             "employee_name": employee_name,
             "total_hours": round(data["hours"], 2),
             "total_revenue": round(data["revenue"], 2),
+            "total_cost": round(data["cost"], 2),
             "total_profit": round(data["profit"], 2),
+            "gross_margin_pct": _calc_margin(data["revenue"], data["cost"]),
             "utilization_pct": utilization,
             "projects": projects,
             "contribution_status": contribution_status,
