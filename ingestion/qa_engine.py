@@ -1030,10 +1030,10 @@ def _answer_last_month_margin(question: str, records: list[dict], time_range: st
         "visual_type": "metric",
         "columns": [],
         "data": [
-            {"label": "Gross Margin", "value": f"{gross_margin:.1f}%"},
-            {"label": "Revenue", "value": f"${total_revenue:,.2f}"},
-            {"label": "Cost", "value": f"${total_cost:,.2f}"},
-            {"label": "Profit", "value": f"${total_profit:,.2f}"},
+            {"label": "Gross Margin", "value": gross_margin},
+            {"label": "Revenue", "value": total_revenue},
+            {"label": "Cost", "value": total_cost},
+            {"label": "Profit", "value": total_profit},
         ],
         "sources": {
             "total_records": len(records),
