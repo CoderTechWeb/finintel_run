@@ -416,6 +416,7 @@ def build_employee_summaries(records: List[dict]) -> List[dict]:
             "total_revenue": round(data["revenue"], 2),
             "total_cost": round(data["cost"], 2),
             "total_profit": round(data["profit"], 2),
+            "gross_margin_pct": _calc_margin(data["revenue"], data["cost"]),
             "utilization_pct": utilization,
             "projects": projects,
             "contribution_status": contribution_status,
