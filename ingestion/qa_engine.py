@@ -403,7 +403,7 @@ def _extract_rows(text: str):
                         row["month_no"] = int(round(fv))
                 elif k == "quarter":
                     row["quarter"] = v
-                elif k.replace(" ", "") in ("quarterno", "quarterno", "quarter_no", "qno"):
+                elif k.replace(" ", "") in ("quarterno", "quarter_no", "qno"):
                     fv = _to_float_num(v)
                     if fv is not None:
                         row["quarter_no"] = int(round(fv))

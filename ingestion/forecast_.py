@@ -239,7 +239,6 @@ If is_forecast=true, also fill in:
                     
                     if month_matches or quarter_matches:
                         # Get the last month in the dataset to compare
-                        from .dataset import get_months_available, GLOBAL_DATASET
                         available_months = get_months_available(GLOBAL_DATASET)
                         if available_months:
                             last_month = _parse_month_date(available_months[-1])
