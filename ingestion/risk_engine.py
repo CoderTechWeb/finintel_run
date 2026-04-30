@@ -226,10 +226,9 @@ def employee_performance_score(emp_records: list[dict]) -> dict:
       Attendance           30%  — low leave = consistent availability
 
     Bands:
-      80–100 → High
-      60–79  → Average
-      40–59  → Low
-       0–39  → At Risk
+      71–100 → High
+      41–70  → Average
+       0–40  → Low
     """
     total_rev    = sum(_num(r.get("revenue"))        for r in emp_records)
     total_cost   = sum(_num(r.get("cost"))           for r in emp_records)
@@ -261,17 +260,15 @@ def employee_performance_score(emp_records: list[dict]) -> dict:
     leave_score = max(0.0, 100.0 - leave_pct * 4.0)
 
     composite = round(
-        margin_score * 0.40 + util_score * 0.30 + leave_score * 0.30, 1
+        (margin_score + util_score + leave_score) / 3, 1
     )
 
-    if composite >= 80:
+    if composite >= 71:
         band = "High"
-    elif composite >= 60:
+    elif composite >= 41:
         band = "Average"
-    elif composite >= 40:
-        band = "Low"
     else:
-        band = "At Risk"
+        band = "Low"
 
     return {
         "score":     composite,
