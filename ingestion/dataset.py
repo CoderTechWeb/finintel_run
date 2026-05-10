@@ -109,6 +109,12 @@ def append_records(records: List[dict], filename: str = ""):
                 r["month"] = norm_month
                 mon = norm_month
 
+            # Normalize project name so "FinIntel" / "Finintel" / "finintel" merge into one key
+            if proj:
+                norm_proj = proj.strip().title()
+                if norm_proj != proj:
+                    r["project"] = norm_proj
+
             # Tag record with source file for audit trail
             if filename and "_source_file" not in r:
                 r["_source_file"] = filename
