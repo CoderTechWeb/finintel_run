@@ -14,7 +14,7 @@ Production-ready for HR performance reviews. Covers:
 
   WORKFORCE / HR RISKS
   ────────────────────
-  BURNOUT_RISK              Utilisation > 105% for 2+ consecutive months
+  BURNOUT_RISK              Utilisation > 95% for 2+ consecutive months
   FLIGHT_RISK               Leave spike AND declining billable hours — pre-resignation pattern
   DISENGAGEMENT_RISK        Utilisation declining 3+ consecutive months
   HIGH_LEAVE                Leave > 25% of working days in a month
@@ -25,7 +25,7 @@ Production-ready for HR performance reviews. Covers:
 
   POSITIVE SIGNALS (for retention and recognition)
   ─────────────────────────────────────────────────
-  STAR_PERFORMER            Margin > 40%, utilisation 85–105%, leave < 15%
+  STAR_PERFORMER            Margin > 40%, utilisation 85–95%, leave < 15%
   CONSISTENT_PERFORMER      Solid metrics sustained across 3+ months
 
   PROJECT HEALTH
@@ -72,7 +72,7 @@ THRESHOLDS = {
     "margin_warning":          20.0,   # above → Warning; below → Risk
     "margin_employee_low":     15.0,   # employee-level low-margin flag
     "rate_gap_min":             1.15,  # billing/cost ratio min before RATE_GAP_RISK
-    "utilisation_overload":   105.0,   # above → burnout territory
+    "utilisation_overload":    95.0,   # above → burnout territory
     "utilisation_optimal_hi": 100.0,
     "utilisation_optimal_lo":  75.0,
     "utilisation_low":         75.0,   # below → LOW_UTILISATION
@@ -85,7 +85,7 @@ THRESHOLDS = {
     "onboarding_util_min":     60.0,
     "star_margin_min":         40.0,
     "star_util_min":           85.0,
-    "star_util_max":          105.0,
+    "star_util_max":           95.0,
     "revenue_kpd_threshold": 10000.0,  # key-person-dependency revenue floor
     "declining_project_pts":    3.0,   # margin pts decline per month to flag
     "trend_margin_drop":        2.0,   # portfolio margin pts drop to flag
