@@ -205,9 +205,37 @@ set_on_dataset_change_callback(_invalidate_all_caches)
 
 # ── Context builder ──────────────────────────────────────────────────────────
 
-def _detect_question_scope(question: str) -> dict:
-    """Analyze question to determine what context sections are needed."""
+def _detect_question_scope(question: str, records: list = None) -> dict:
+    """Analyze question to determine what context sections are needed.
+    
+    Args:
+        question: The user's question
+        records: Optional dataset records to validate entity names against actual data
+    """
     q = (question or "").lower()
+    
+    # Fix 2: Build lookup sets from actual data (case-insensitive)
+    actual_employees = set()
+    actual_employees_original = {}  # lowercase -> original case
+    actual_projects = set()
+    actual_projects_original = {}  # lowercase -> original case
+    if records:
+        for r in records:
+            emp = r.get("employee", "")
+            proj = r.get("project", "")
+            if emp:
+                emp_lower = emp.lower()
+                actual_employees.add(emp_lower)
+                actual_employees_original[emp_lower] = emp
+                # Also add first name for partial matching
+                first_name = emp.split()[0].lower() if emp else ""
+                if first_name:
+                    actual_employees.add(first_name)
+                    actual_employees_original[first_name] = emp.split()[0]
+            if proj:
+                proj_lower = proj.lower()
+                actual_projects.add(proj_lower)
+                actual_projects_original[proj_lower] = proj
     
     scope = {
         "needs_overall": True,  # Always include
@@ -219,6 +247,7 @@ def _detect_question_scope(question: str) -> dict:
         "specific_employee": None,
         "specific_project": None,
         "specific_month": None,
+        "missing_entities": [],  # Fix 2: Track entities not found in data
     }
     
     # Project-related keywords (expanded)
@@ -265,15 +294,79 @@ def _detect_question_scope(question: str) -> dict:
         "employees", "employee", "project", "projects", "highest", "lowest", "top", "bottom",
         "best", "worst", "most", "least", "generated", "has", "have", "had", "are", "is", "was",
         "show", "compare", "trend", "performance", "health", "summary", "insights", "issues",
-        "risks", "anomalies", "identify", "detect", "predict", "suggest", "analyze"
+        "risks", "anomalies", "identify", "detect", "predict", "suggest", "analyze",
+        # Action words (Fix 1: prevent these from being detected as names)
+        "compute", "calculate", "find", "get", "display", "tell", "about",
+        # Time period words
+        "monthly", "weekly", "daily", "yearly", "annual", "quarterly",
+        "forecast", "projection", "budget", "estimate", "expected", "actual",
     }
-    name_match = re.findall(r"\b([A-Z][a-z]+)\b", question)
-    for name in name_match:
-        if name.lower() not in common_words and name.lower() not in month_pattern:
-            scope["needs_employee_summary"] = True
-            scope["needs_employee_details"] = True
-            scope["specific_employee"] = name
-            break
+    
+    # Fix 2: Data-based entity detection (works with any case)
+    # Short words to skip (prepositions, articles, etc.)
+    skip_words = {"in", "on", "at", "to", "of", "by", "vs", "or", "an", "a", "the", "is", "it"}
+    
+    if records and (actual_employees or actual_projects):
+        # Check each word in question against actual data
+        words = re.findall(r"[a-zA-Z]+(?:'s)?", question)
+        for word in words:
+            # Clean the word: remove possessive 's and convert to lowercase
+            word_clean = word.lower()
+            if word_clean.endswith("'s"):
+                word_clean = word_clean[:-2]
+            
+            # Skip common words, short words, and month names (exact match only)
+            if word_clean in common_words or word_clean in skip_words or re.fullmatch(month_pattern, word_clean):
+                continue
+            
+            # Check if it's an actual employee (exact match only for short words)
+            if len(word_clean) <= 2:
+                is_employee = word_clean in actual_employees
+                is_project = word_clean in actual_projects
+            else:
+                is_employee = word_clean in actual_employees or any(word_clean in e for e in actual_employees)
+                is_project = word_clean in actual_projects or any(word_clean in p for p in actual_projects)
+            
+            if is_project and not is_employee:
+                # Definitely a project
+                scope["needs_projects"] = True
+                scope["specific_project"] = actual_projects_original.get(word_clean, word.title())
+            elif is_employee and not is_project:
+                # Definitely an employee
+                scope["needs_employee_summary"] = True
+                scope["needs_employee_details"] = True
+                scope["specific_employee"] = actual_employees_original.get(word_clean, word.title())
+            elif is_employee and is_project:
+                # Fix 4: Ambiguous - use context clues to disambiguate
+                project_context = any(kw in q for kw in ["project", "client", "project's", "of project"])
+                employee_context = any(kw in q for kw in ["employee", "person", "employee's", "'s performance", "'s margin", "'s utilization"])
+                
+                if project_context and not employee_context:
+                    scope["needs_projects"] = True
+                    scope["specific_project"] = actual_projects_original.get(word_clean, word.title())
+                elif employee_context and not project_context:
+                    scope["needs_employee_summary"] = True
+                    scope["needs_employee_details"] = True
+                    scope["specific_employee"] = actual_employees_original.get(word_clean, word.title())
+                else:
+                    # Still ambiguous - include both
+                    scope["needs_employee_summary"] = True
+                    scope["needs_employee_details"] = True
+                    scope["specific_employee"] = actual_employees_original.get(word_clean, word.title())
+                    scope["needs_projects"] = True
+                    scope["specific_project"] = actual_projects_original.get(word_clean, word.title())
+            elif len(word_clean) > 2 and word[0].isupper():
+                # Capitalized word not in data - track as missing
+                scope["missing_entities"].append(word.replace("'s", ""))
+    else:
+        # Fallback: Old behavior when no records provided (capitalized words)
+        name_match = re.findall(r"\b([A-Z][a-z]+)\b", question)
+        for name in name_match:
+            if name.lower() not in common_words and not re.match(month_pattern, name.lower()):
+                scope["needs_employee_summary"] = True
+                scope["needs_employee_details"] = True
+                scope["specific_employee"] = name
+                break
     
     # For project utilization questions, ONLY need PROJECTS section (not employees)
     is_project_util_question = ("project" in q) and any(w in q for w in ["utilization", "utilisation", "util"])
@@ -360,8 +453,8 @@ def _build_dataset_context(records=None, question: str = None):
     if not recs:
         return "No data has been loaded yet."
 
-    # Determine what sections are needed based on question
-    scope = _detect_question_scope(question) if question else None
+    # Determine what sections are needed based on question (Fix 2: pass records for validation)
+    scope = _detect_question_scope(question, recs) if question else None
     include_all = scope is None  # If no question, include everything
     
     overall = build_overall_summary(recs)

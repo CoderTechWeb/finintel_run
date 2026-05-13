@@ -30,6 +30,7 @@ _FORECAST_KEYWORDS = [
     # Time-based (singular)
     "next month", "next quarter", "next year", "upcoming",
     "next week", "coming month", "coming quarter", "following month",
+    "following quarter", "following year",
     "upcoming quarter", "upcoming quarters", "coming quarters",
     # Time-based (informal)
     "next few months", "couple of months", "few months ahead",
@@ -71,7 +72,7 @@ def _is_future_date(question: str) -> bool:
     q = question.lower()
     
     # Check for "next month/quarter/year" keywords (singular)
-    if re.search(r"\b(next\s+(?:month|quarter|year)|upcoming|future)\b", q, re.IGNORECASE):
+    if re.search(r"\b(next\s+(?:month|quarter|year)|upcoming|future|coming\s+(?:month|quarter)|following\s+(?:month|quarter))\b", q, re.IGNORECASE):
         return True
     
     # Check for "next N months/quarters" patterns
@@ -131,6 +132,10 @@ def _is_past_date(question: str) -> bool:
     current_month = today.month
     
     q = question.lower()
+    
+    # Check for relative past keywords
+    if re.search(r"\b(last\s+(?:month|quarter|year)|previous\s+(?:month|quarter|year)|past\s+(?:month|quarter))\b", q, re.IGNORECASE):
+        return True
     
     # Check for year-only patterns: "in 2024", "for 2024", "2024 revenue"
     year_only_match = re.search(r"\b(?:in|for|during)?\s*(20\d{2})\b", q)
@@ -205,21 +210,22 @@ def is_likely_forecast(question: str) -> bool:
         _debug("is_likely_forecast: Found past date only, returning False")
         return False
 
-    # 2. Check for non-forecast keywords
-    for kw in _NON_FORECAST_KEYWORDS:
-        if kw in q:
-            _debug(f"is_likely_forecast: Found non-forecast keyword '{kw}', returning False")
-            return False
-
-    # 3. Check for strong forecast indicators
+    # 2. Check for strong forecast indicators FIRST
+    # This handles "Compare current revenue with forecast for next month"
     if any(kw in q for kw in _FORECAST_KEYWORDS):
         _debug("is_likely_forecast: Found forecast keyword, returning True")
         return True
 
-    # 4. Check for future dates (dynamically compared to today)
-    if _is_future_date(question):
+    # 3. Check for future dates
+    if has_future:
         _debug("is_likely_forecast: Found future date, returning True")
         return True
+
+    # 4. Check for non-forecast keywords (only if no forecast indicators)
+    for kw in _NON_FORECAST_KEYWORDS:
+        if kw in q:
+            _debug(f"is_likely_forecast: Found non-forecast keyword '{kw}', returning False")
+            return False
 
     _debug(f"is_likely_forecast: No forecast indicators found, returning False")
     return False
@@ -1458,7 +1464,20 @@ def try_answer_forecast(question: str, records: List[dict] = None) -> Optional[s
         _debug("No months available, returning insufficient data message")
         return "Insufficient historical data to estimate a forecast."
     last_label = months[-1]
-    base = _parse_month_date(last_label) or dt.date.today().replace(day=1)
+    last_data_date = _parse_month_date(last_label) or dt.date.today().replace(day=1)
+    
+    # Fix: For forecast queries, base should be relative to current date
+    # Only use last_data_date if query has explicit past/specific dates
+    q_lower = question.lower()
+    has_explicit_date = bool(re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b", q_lower)) or \
+                        bool(re.search(r"\bq[1-4]\s+\d{4}\b", q_lower))
+    
+    if has_explicit_date:
+        base = last_data_date  # Use last data month for explicit date queries
+        _debug(f"Explicit date in query, using last data month as base: {base}")
+    else:
+        base = dt.date.today().replace(day=1)  # Default: current month as base
+        _debug(f"Using current date as base: {base}")
 
     # Collect known entities for LLM context
     known_projects = _distinct_values(recs, "project")
