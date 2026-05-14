@@ -221,6 +221,35 @@ def _invalidate_all_caches():
 set_on_dataset_change_callback(_invalidate_all_caches)
 
 
+def _fuzzy_match_suggestion(typo: str, known_names: list, threshold: float = 0.6) -> str:
+    """Find closest match for a typo using simple similarity ratio.
+    
+    Returns the best match if similarity >= threshold, else None.
+    """
+    if not typo or not known_names:
+        return None
+    typo_lower = typo.lower()
+    best_match = None
+    best_score = 0
+    
+    for name in known_names:
+        name_lower = name.lower()
+        # Simple similarity: common characters / max length
+        common = sum(1 for c in typo_lower if c in name_lower)
+        score = common / max(len(typo_lower), len(name_lower))
+        # Bonus for same starting letter
+        if typo_lower and name_lower and typo_lower[0] == name_lower[0]:
+            score += 0.2
+        # Bonus for substring match
+        if typo_lower in name_lower or name_lower in typo_lower:
+            score += 0.3
+        if score > best_score:
+            best_score = score
+            best_match = name
+    
+    return best_match if best_score >= threshold else None
+
+
 # ── Context builder ──────────────────────────────────────────────────────────
 
 def _detect_question_scope(question: str, records: list = None) -> dict:
@@ -375,8 +404,16 @@ def _detect_question_scope(question: str, records: list = None) -> dict:
                     scope["needs_projects"] = True
                     scope["specific_project"] = actual_projects_original.get(word_clean, word.title())
             elif len(word_clean) > 2 and word[0].isupper():
-                # Capitalized word not in data - track as missing
-                scope["missing_entities"].append(word.replace("'s", ""))
+                # Capitalized word not in data - track as missing and try fuzzy match
+                missing_word = word.replace("'s", "")
+                scope["missing_entities"].append(missing_word)
+                # Try fuzzy match for typo correction
+                all_known = list(actual_projects_original.values()) + list(actual_employees_original.values())
+                suggestion = _fuzzy_match_suggestion(missing_word, all_known)
+                if suggestion:
+                    if "suggestions" not in scope:
+                        scope["suggestions"] = []
+                    scope["suggestions"].append(f"'{missing_word}' -> Did you mean '{suggestion}'?")
     else:
         # Fallback: Old behavior when no records provided (capitalized words)
         name_match = re.findall(r"\b([A-Z][a-z]+)\b", question)
@@ -507,6 +544,20 @@ def _build_dataset_context(records=None, question: str = None):
     if months:
         lines.append(f"LAST MONTH (most recent data available): {months[-1]}")
         lines.append(f"NOTE: If user asks about 'last month', return data for {months[-1]} and clarify this is the most recent data available.")
+    
+    # Add typo suggestions if any
+    if scope and scope.get("suggestions"):
+        lines.append("")
+        lines.append("=== POSSIBLE TYPOS DETECTED ===")
+        for suggestion in scope["suggestions"]:
+            lines.append(f"WARNING: {suggestion}")
+        lines.append("If the user meant one of the suggested names, use that data. Otherwise, respond with 'No data found'.")
+    
+    # Add missing entities warning
+    if scope and scope.get("missing_entities"):
+        all_projects = sorted(set(r.get("project") for r in recs if r.get("project")))
+        lines.append(f"NOTE: '{', '.join(scope['missing_entities'])}' not found in data. Available projects: {', '.join(all_projects)}")
+    
     lines.append("")
 
     # Projects - include if needed
@@ -633,7 +684,7 @@ def _build_dataset_context(records=None, question: str = None):
                 f"BillableHours={billable_hrs}, Status={proj_status}, "
                 f"RevenueTrend={rev_trend}, CostTrend={cost_trend}, ProfitTrend={profit_trend}, MarginTrend={margin_trend}, UtilTrend={util_trend}, "
                 f"BestRevenueMonth={best_rev_month}, WorstRevenueMonth={worst_rev_month}, "
-                f"MonthlyBreakdown=[{', '.join(f'{m}:Rev=${monthly_data[m]["rev"]:,.0f}/Cost=${monthly_data[m]["cost"]:,.0f}/Util={round(sum(monthly_data[m].get("util_vals", [0])) / max(len(monthly_data[m].get("util_vals", [1])), 1), 1)}%' for m in sorted_months)}]"
+                f"MonthlyBreakdown(last {min(6, len(sorted_months))} months)=[{', '.join(f'{m}:Rev=${monthly_data[m]["rev"]:,.0f}/Cost=${monthly_data[m]["cost"]:,.0f}/Util={round(sum(monthly_data[m].get("util_vals", [0])) / max(len(monthly_data[m].get("util_vals", [1])), 1), 1)}%' for m in sorted_months[-6:])}]"
             )
         lines.append("")
 
@@ -1613,17 +1664,102 @@ def ask(question: str, time_range: str = None) -> dict:
         }
 
     _log(f"Total time: {time.time() - _start_time:.2f}s")
+    
+    # Detect echo/hallucination: LLM just repeating the question back
+    raw_lower = (raw_response or "").lower().strip()
+    q_lower = (question or "").lower().strip()
+    
+    # Pre-compute scope once for fallback use (lightweight - just string matching)
+    _fallback_scope = None
+    _fallback_project_data = None
+    
+    def _get_fallback_data():
+        """Lazy-load fallback data only when needed (avoids iterating 1000s of records unless necessary)."""
+        nonlocal _fallback_scope, _fallback_project_data
+        if _fallback_scope is None:
+            _fallback_scope = _detect_question_scope(question, records)
+            if _fallback_scope.get("specific_project"):
+                proj_name = _fallback_scope["specific_project"]
+                # Filter records for this project FIRST, then aggregate (much faster)
+                proj_records = [r for r in records if r.get("project") == proj_name]
+                if proj_records:
+                    # Simple aggregation for single project
+                    _fallback_project_data = {
+                        "name": proj_name,
+                        "revenue": sum(float(r.get("revenue") or 0) for r in proj_records),
+                        "cost": sum(float(r.get("cost") or 0) for r in proj_records),
+                        "profit": sum(float(r.get("profit") or 0) for r in proj_records),
+                        "employees": len(set(r.get("employee") for r in proj_records if r.get("employee"))),
+                    }
+        return _fallback_scope, _fallback_project_data
+    
+    # Check if response is just echoing the question (hallucination indicator)
+    # Only check for echo if response is NOT valid JSON (valid JSON means LLM processed it)
+    is_likely_json = raw_lower.strip().startswith('{') or '{"summary"' in raw_lower
+    if raw_lower and q_lower and not is_likely_json:
+        # Remove common prefixes/suffixes for comparison
+        raw_clean = re.sub(r'^(project\s+|details\s+(of|for)\s+|show\s+|get\s+)', '', raw_lower)
+        q_clean = re.sub(r'^(project\s+|details\s+(of|for)\s+|show\s+|get\s+)', '', q_lower)
+        # If response is very similar to question (echo), it's likely hallucination
+        # Must be high similarity (>80% match) to avoid false positives
+        if raw_clean.replace(' ', '') == q_clean.replace(' ', ''):
+            _log(f"WARNING: LLM echoed question back - likely hallucination", "debug")
+            # Return structured response with actual data (lazy-loaded)
+            scope, proj_data = _get_fallback_data()
+            if proj_data:
+                return {
+                    "summary": f"{proj_data['name']}: Revenue=${proj_data['revenue']:,.2f}, Cost=${proj_data['cost']:,.2f}, Profit=${proj_data['profit']:,.2f}, Employees={proj_data['employees']}",
+                    "visual_type": "metric",
+                    "columns": [],
+                    "data": [
+                        {"label": "Revenue", "value": proj_data['revenue']},
+                        {"label": "Cost", "value": proj_data['cost']},
+                        {"label": "Profit", "value": proj_data['profit']},
+                        {"label": "Employees", "value": proj_data['employees']},
+                    ],
+                    "sources": {"total_records": len(records), "fallback": "echo_detection"},
+                }
+    
     # Parse the JSON from the LLM
     parsed_json = _extract_qa_json(raw_response)
     
     # Validate and fix LLM response structure
     if not parsed_json or not isinstance(parsed_json, dict):
+        _log(f"LLM returned non-JSON response, using fallback", "debug")
         parsed_json = {
             "summary": _clean_answer(raw_response),
             "visual_type": "text",
             "data": [],
             "columns": []
         }
+    
+    # Check for hallucination: summary is too short or generic
+    # Only trigger if summary looks like echoed question (not a valid short answer)
+    summary = parsed_json.get("summary", "")
+    summary_lower = summary.lower().strip()
+    looks_like_echo = summary_lower and (
+        summary_lower in q_lower or 
+        q_lower.rstrip('?').rstrip('.') in summary_lower or
+        summary_lower.endswith('details') or
+        summary_lower.endswith('details.')
+    )
+    if summary and len(summary) < 30 and not parsed_json.get("data") and looks_like_echo:
+        # Very short summary that looks like echoed question - likely hallucination
+        _log(f"WARNING: Short echo-like summary with no data - possible hallucination: '{summary}'", "debug")
+        # Try to provide actual data (reuse lazy-loaded fallback)
+        scope, proj_data = _get_fallback_data()
+        if proj_data:
+            parsed_json = {
+                "summary": f"{proj_data['name']}: Revenue=${proj_data['revenue']:,.2f}, Cost=${proj_data['cost']:,.2f}, Profit=${proj_data['profit']:,.2f}, Employees={proj_data['employees']}",
+                "visual_type": "metric",
+                "columns": [],
+                "data": [
+                    {"label": "Revenue", "value": proj_data['revenue']},
+                    {"label": "Cost", "value": proj_data['cost']},
+                    {"label": "Profit", "value": proj_data['profit']},
+                    {"label": "Employees", "value": proj_data['employees']},
+                ],
+            }
     
     # Ensure required fields exist with correct types
     if "summary" not in parsed_json or not isinstance(parsed_json.get("summary"), str):
