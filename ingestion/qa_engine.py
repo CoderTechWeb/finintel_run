@@ -294,6 +294,8 @@ def _detect_question_scope(question: str, records: list = None) -> dict:
         "specific_employee": None,
         "specific_project": None,
         "specific_month": None,
+        "specific_year": None,
+        "mentioned_projects": [],
         "missing_entities": [],  # Fix 2: Track entities not found in data
     }
     
@@ -315,13 +317,20 @@ def _detect_question_scope(question: str, records: list = None) -> dict:
     if any(w in q for w in monthly_keywords):
         scope["needs_monthly"] = True
     
-    # Specific month mentioned
-    month_pattern = r"(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+    # Specific month mentioned (with optional year)
+    month_pattern = r"(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\w*[\s,\-]*(\d{4})?"
     month_match = re.search(month_pattern, q)
     if month_match:
         scope["needs_monthly"] = True
         scope["needs_employee_details"] = True
         scope["specific_month"] = month_match.group(1)
+        scope["specific_year"] = month_match.group(2)  # e.g. "2024" or None
+
+    # Year-only mention (no month): e.g. "in 2024", "for 2024", "2024 revenue"
+    if not scope["specific_year"]:
+        year_only = re.search(r"\b(20\d{2})\b", q)
+        if year_only:
+            scope["specific_year"] = year_only.group(1)
     
     # Employee-related keywords (expanded for natural language)
     employee_keywords = [
@@ -480,6 +489,12 @@ def _detect_question_scope(question: str, records: list = None) -> dict:
         scope["needs_projects"] = True
         scope["needs_employee_summary"] = True
         scope["needs_monthly"] = True
+        # Resolve canonical project names for compare — prevents single-project filtering
+        if actual_projects_original:
+            mentioned = match_entities_by_word_boundary([question], list(actual_projects_original.values()))
+            scope["mentioned_projects"] = mentioned
+            if len(mentioned) >= 2:
+                scope["specific_project"] = None  # Show ALL mentioned projects, not just one
     
     # Insight/summary queries (executive level)
     insight_keywords = [
@@ -530,7 +545,15 @@ def _build_dataset_context(records=None, question: str = None):
     # Determine what sections are needed based on question (Fix 2: pass records for validation)
     scope = _detect_question_scope(question, recs) if question else None
     include_all = scope is None  # If no question, include everything
-    
+
+    # Year-aware context narrowing: when exactly 1 year is mentioned, restrict context to that year.
+    # Applied locally here only — does NOT touch the records used by Forecast in ask().
+    specific_year = scope.get("specific_year") if scope else None
+    if specific_year:
+        year_matches = re.findall(r"\b(20\d{2})\b", question or "")
+        if len(year_matches) == 1:  # Only filter when unambiguous (not multi-year compare)
+            recs = [r for r in recs if specific_year in (r.get("month") or "")]
+
     overall = build_overall_summary(recs)
     months = get_months_available(recs)
 
@@ -603,7 +626,15 @@ def _build_dataset_context(records=None, question: str = None):
         
         lines.append("=== PROJECTS ===")
         lines.append(f"AVAILABLE PROJECTS (use EXACT names): {', '.join(sorted(projects.keys()))}")
-        
+
+        # Inject canonical names for compare queries so LLM uses exact casing
+        mentioned_projs = scope.get("mentioned_projects", []) if scope else []
+        if len(mentioned_projs) >= 2:
+            lines.append(
+                f"COMPARE INSTRUCTION: User is comparing {' vs '.join(mentioned_projs)}. "
+                f"Use EXACTLY these names as column headers: {', '.join(mentioned_projs)}"
+            )
+
         # Filter to specific project if requested
         specific_proj = scope.get("specific_project") if scope else None
         _log(f"Building context: specific_project={specific_proj}, all_projects={list(projects.keys())}", "debug")
@@ -625,8 +656,14 @@ def _build_dataset_context(records=None, question: str = None):
                 lines.append(f"WARNING: Requested project '{specific_proj}' not found. Showing all projects.")
                 projects_to_show = projects
         else:
-            projects_to_show = projects
-        
+            # For compare queries with 2+ projects, restrict to mentioned projects only
+            if len(mentioned_projs) >= 2:
+                projects_to_show = {p: projects[p] for p in mentioned_projs if p in projects}
+                if not projects_to_show:  # fallback if none matched
+                    projects_to_show = projects
+            else:
+                projects_to_show = projects
+
         if not specific_proj:
             lines.append(f"RANKING HINTS: HighestUtilization={sorted_by_util[0][0]}, LowestUtilization={sorted_by_util[-1][0]}, "
                          f"HighestRevenue={sorted_by_revenue[0][0]}, LowestRevenue={sorted_by_revenue[-1][0]}, "
@@ -703,8 +740,13 @@ def _build_dataset_context(records=None, question: str = None):
         }
         display_month = month_names.get(month_key, month_key.capitalize())
         
-        # Filter records for this specific month
-        month_filtered_recs = [r for r in recs if month_key in (r.get("month") or "").lower()]
+        # Filter records for this specific month (year-aware)
+        specific_year = scope.get("specific_year") if scope else None
+        month_filtered_recs = [
+            r for r in recs
+            if month_key in (r.get("month") or "").lower()
+            and (not specific_year or specific_year in (r.get("month") or ""))
+        ]
         
         if month_filtered_recs:
             lines.append(f"=== DATA FOR {display_month.upper()} ONLY ===")
@@ -882,8 +924,8 @@ Q: "Show employees with revenue above $10,000"
 Q: "Revenue per employee"
 {{"summary": "Average revenue per employee.", "visual_type": "metric", "columns": [], "data": [{{"label": "Revenue per Employee", "value": 12500}}]}}
 
-Q: "Compare Project Alpha vs Project Beta"
-{{"summary": "Comparison of Project Alpha and Project Beta.", "visual_type": "table", "columns": ["metric", "Project Alpha", "Project Beta"], "data": [{{"metric": "Revenue", "Project Alpha": 50000, "Project Beta": 45000}}, {{"metric": "Profit", "Project Alpha": 12000, "Project Beta": 10000}}, {{"metric": "Margin", "Project Alpha": 24, "Project Beta": 22}}]}}
+Q: "Compare Project Alpha vs Project Beta" or "compare projects"
+{{"summary": "Comparison of ALPHA vs BETA.", "visual_type": "table", "columns": ["metric", "ALPHA", "BETA"], "data": [{{"metric": "Revenue", "ALPHA": 50000, "BETA": 45000}}, {{"metric": "Cost", "ALPHA": 38000, "BETA": 35000}}, {{"metric": "Profit", "ALPHA": 12000, "BETA": 10000}}, {{"metric": "Margin %", "ALPHA": 24, "BETA": 22}}, {{"metric": "Utilization %", "ALPHA": 85, "BETA": 78}}, {{"metric": "Employees", "ALPHA": 5, "BETA": 4}}]}}
 
 Q: "Top 3 employees in Project Alpha"
 {{"summary": "Top 3 employees in Project Alpha by profit.", "visual_type": "table", "columns": ["employee", "project", "profit"], "data": [{{"employee": "John", "project": "Alpha", "profit": 8000}}, {{"employee": "Jane", "project": "Alpha", "profit": 6000}}, {{"employee": "Bob", "project": "Alpha", "profit": 4000}}]}}
@@ -905,7 +947,7 @@ RULES:
 11. "not generating", "zero", "no revenue/profit" = filter for values that are 0 or negative
 12. "below X%", "less than X", "under X" = ONLY include values < X; "above X%", "more than X", "over X" = ONLY include values > X. NEVER include values that don't meet the threshold!
 13. "per employee", "per project", "per hour" = calculate average or divide total by count
-14. "compare A vs B" = show side-by-side comparison table with metrics as rows
+14. "compare A vs B" or "compare projects" = show side-by-side comparison table with metrics as rows. Column headers MUST be the EXACT project name as listed in "AVAILABLE PROJECTS" (e.g., "BARCLAYS" not "Project Barclays"). Include all key metrics: Revenue, Cost, Profit, Margin %, Utilization %, Employees. Use only numeric values — NEVER text like "No data available".
 15. "YTD", "year to date" = sum from January to the last available month
 16. "Q1" = Jan-Mar, "Q2" = Apr-Jun, "Q3" = Jul-Sep, "Q4" = Oct-Dec
 17. For "top N in Project X" = filter by project first, then rank
@@ -914,7 +956,7 @@ RULES:
 
 ANTI-HALLUCINATION (CRITICAL):
 20. ONLY use data explicitly provided in the context above. NEVER invent, estimate, or assume values.
-21. If a project/employee name is asked but NOT found in the data, respond: {{"summary": "No data found for [name]. Available projects: [list from data]", "visual_type": "text", "columns": [], "data": []}}
+21. If a project/employee name is completely absent from the data (zero records), respond as a WHOLE with: {{"summary": "No data found for [name]. Available: [list]", "visual_type": "text", "columns": [], "data": []}}. NEVER write "No data found" or any error text as a cell value inside a table — use 0 instead.
 22. Project names are CASE-SENSITIVE and must match EXACTLY as shown in PROJECTS section (e.g., "BARCLAYS" not "Barclays", "CRYSTAL" not "Crystal").
 23. If the question mentions a name similar to but not exactly matching a project/employee, clarify: "Did you mean [exact name from data]?"
 24. NEVER mix data from different projects. Each project's metrics are independent.
@@ -1785,6 +1827,15 @@ def ask(question: str, time_range: str = None) -> dict:
     visual_type = parsed_json.get("visual_type", "text")
     raw_data = parsed_json.get("data", [])
     raw_columns = parsed_json.get("columns", [])
+
+    # Scrub LLM placeholder strings from cell values (catches "No data found for X.", "N/A", etc.)
+    _NO_DATA_RE = re.compile(r"no\s+data\s+(found|available)(?: for [^\"]+)?\.*", re.IGNORECASE)
+    if raw_data and isinstance(raw_data, list):
+        for row in raw_data:
+            if isinstance(row, dict):
+                for k, v in list(row.items()):
+                    if isinstance(v, str) and (_NO_DATA_RE.search(v.strip()) or v.strip().lower() in {"n/a", "na", "not available"}):
+                        row[k] = None
     
     if visual_type == "table" and raw_data and not raw_columns:
         # Extract columns from first data row

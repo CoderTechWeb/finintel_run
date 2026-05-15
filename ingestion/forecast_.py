@@ -48,13 +48,16 @@ _FORECAST_KEYWORDS = [
     # Time-based (informal)
     "next few months", "couple of months", "few months ahead",
     "quarters ahead", "months ahead",
-    # Current period (often implies forecast for rest of period)
-    "this quarter", "this qtr", "rest of quarter", "rest of year",
+    # Current period (only rest-of-period implies forecast; "this quarter" alone is historical)
+    "rest of quarter", "rest of year",
     # Future tense
     "will be", "would be", "expected to", "expecting", "expect",
     # Planning & scenarios
     "future", "outlook", "budget for", "plan for", "planning",
-    "target for", "what if", "scenario", "simulation",
+    "target for", "what if", "what happens if", "what would happen",
+    "impact of adding", "scenario", "simulation",
+    # Capacity planning
+    "capacity", "capacity for", "capacity planning",
     # Growth
     "grow to", "reach by", "trend forward",
 ]
@@ -85,13 +88,17 @@ def _is_future_date(question: str) -> bool:
     q = question.lower()
     
     # Check for "next month/quarter/year" keywords (singular)
-    if re.search(r"\b(next\s+(?:month|quarter|year)|upcoming|future|coming\s+(?:month|quarter)|following\s+(?:month|quarter))\b", q, re.IGNORECASE):
+    if re.search(r"\b(next\s+(?:month|quarter|year)|upcoming|future|coming\s+(?:month|quarter|up)|following\s+(?:month|quarter))\b", q, re.IGNORECASE):
         return True
-    
+
     # Check for "next N months/quarters" patterns
     if re.search(r"\bnext\s+\d+\s+(?:months?|quarters?)\b", q, re.IGNORECASE):
         return True
-    
+
+    # Check for "coming N months/quarters" patterns (e.g. "coming 6 months")
+    if re.search(r"\bcoming\s+\d+\s+(?:months?|quarters?)\b", q, re.IGNORECASE):
+        return True
+
     # Check for "N months/quarters ahead" patterns (including "few")
     if re.search(r"\b(?:one|two|three|four|five|six|few|\d+)\s+(?:months?|quarters?)\s+ahead\b", q, re.IGNORECASE):
         return True
